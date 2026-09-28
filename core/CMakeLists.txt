@@ -17,6 +17,9 @@ add_library(hpm_core STATIC
     src/capability/capability_checker.cpp
     src/resolver/id_generator.cpp
     src/resolver/resolver.cpp
+    src/generator/template_engine.cpp
+    src/generator/generator.cpp
+    src/util/fs_utils.cpp
 )
 
 target_include_directories(hpm_core

@@ -7,6 +7,7 @@ add_executable(hpm_tests
     unit/test_manifest.cpp
     unit/test_capability.cpp
     unit/test_resolver.cpp
+    unit/test_generator.cpp
 )
 
 target_link_libraries(hpm_tests
