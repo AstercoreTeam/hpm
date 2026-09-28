@@ -20,6 +20,7 @@ add_library(hpm_core STATIC
     src/generator/template_engine.cpp
     src/generator/generator.cpp
     src/util/fs_utils.cpp
+    src/util/process.cpp
 )
 
 target_include_directories(hpm_core
