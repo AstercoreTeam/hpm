@@ -16,35 +16,39 @@
 #include <catch2/catch_test_macros.hpp>
 #include <hpm/capability/capability_checker.h>
 #include <hpm/capability/driver_library.h>
+#include <hpm/json/json_io.h>
 #include <hpm/manifest/chip_loader.h>
 #include <hpm/manifest/driver_loader.h>
 #include <hpm/manifest/project_loader.h>
-#include <hpm/json/json_io.h> 
+#include <hpm/resolver/resolver.h>
 
 using namespace hpm;
 using namespace hpm::manifest;
 
 namespace {
 
-// 构造测试用芯片
+// ─────────────── 芯片 ───────────────
+
 Chip makeChip() {
     const char* text = R"({
         "name": "stm32f103c8t6",
         "toolchain": { "name": "arm-none-eabi-gcc" },
         "flash": { "tool": "st-flash" },
         "pins": {
+            "PA3": { "capabilities": [{ "type": "gpio_out" }] },
             "PA4": { "capabilities": [{ "type": "gpio_out" }] },
             "PA5": { "shareable": true, "capabilities": [{ "type": "spi_sck", "instance": "SPI1" }] },
             "PA6": { "shareable": true, "capabilities": [{ "type": "spi_miso", "instance": "SPI1" }] },
-            "PA7": { "shareable": true, "capabilities": [{ "type": "spi_mosi", "instance": "SPI1" }] }
+            "PA7": { "shareable": true, "capabilities": [{ "type": "spi_mosi", "instance": "SPI1" }] },
+            "PA8": { "capabilities": [{ "type": "gpio_out" }] }
         }
     })";
     auto j = json::parse(text);
-    auto chip = loadChip(*j);
-    return *chip;
+    return *loadChip(*j);
 }
 
-// 构造驱动库
+// ─────────────── 驱动库 ───────────────
+
 DriverLibrary makeLib() {
     DriverLibrary lib;
 
@@ -77,44 +81,56 @@ DriverLibrary makeLib() {
     return lib;
 }
 
-Project makeValidProject() {
-    const char* text = R"({
-        "mcu": "stm32f103c8t6",
-        "devices": {
-            "spi1": {
-                "driver": "spi",
-                "sck": "PA5",
-                "miso": "PA6",
-                "mosi": "PA7"
-            },
-            "door_reader": {
-                "driver": "rc522",
-                "bus": "spi1",
-                "cs": "PA4",
-                "rst": "PA3"
-            }
-        }
-    })";
-    return *loadProject(*json::parse(text));
+// ─────────────── 构造展开后的 DriverState ───────────────
+
+DriverState makeValidState() {
+    DriverState s;
+
+    Device dr;
+    dr.name = "door_reader";
+    dr.driver = "rc522";
+    dr.version = *Version::parse("1.0.0");
+    dr.bindings["bus"] = "__spi_a3f2";
+    dr.bindings["cs"]  = "PA4";
+    s.userDevices.push_back(dr);
+
+    IntermediateDevice idev;
+    idev.id = "__spi_a3f2";
+    idev.name = "__spi_a3f2";
+    idev.driver = "spi";
+    idev.version = *Version::parse("1.0.0");
+    idev.bindings["sck"]  = "PA5";
+    idev.bindings["miso"] = "PA6";
+    idev.bindings["mosi"] = "PA7";
+    s.intermediateDevices.push_back(idev);
+
+    return s;
+}
+
+// 从 project.json 造 Project，再用 Resolver 展开
+Result<DriverState> makeStateFromProject(const char* json_text,
+                                          const DriverLibrary& lib) {
+    auto j = json::parse(json_text);
+    if (!j) return j.error();
+    auto proj = loadProject(*j);
+    if (!proj) return proj.error();
+    Resolver resolver(lib, *proj);
+    return resolver.resolve();
 }
 
 } // namespace
 
-TEST_CASE("capability check passes for valid project", "[capability]") {
-    auto chip = makeChip();
-    auto lib = makeLib();
-    auto proj = makeValidProject();
+// ─────────────────────────────────────────────
+// 测试
+// ─────────────────────────────────────────────
 
-    // 注意：PA3 不在芯片里，但 rst 可选，所以实际用不到
-    // 这里为了通过，把 rst 从项目里去掉
-    for (auto& d : proj.devices) {
-        if (d.name == "door_reader") {
-            d.bindings.erase("rst");
-        }
-    }
+TEST_CASE("capability check passes for valid state", "[capability]") {
+    auto chip = makeChip();
+    auto lib  = makeLib();
+    auto st   = makeValidState();
 
     CapabilityChecker checker(lib, chip);
-    auto report = checker.check(proj);
+    auto report = checker.check(st);
 
     for (const auto& e : report.errors()) {
         INFO("error: " << e.message);
@@ -124,33 +140,29 @@ TEST_CASE("capability check passes for valid project", "[capability]") {
 
 TEST_CASE("pin conflict detected", "[capability]") {
     auto chip = makeChip();
-    auto lib = makeLib();
+    auto lib  = makeLib();
 
+    // 两个 rc522 都用 PA4 做 cs
     const char* text = R"({
         "mcu": "stm32f103c8t6",
         "devices": {
-            "spi1": {
-                "driver": "spi",
-                "sck": "PA5",
-                "miso": "PA6",
-                "mosi": "PA7"
-            },
             "door_reader": {
                 "driver": "rc522",
-                "bus": "spi1",
-                "cs": "PA4"
+                "cs": "PA4",
+                "sck": "PA5", "miso": "PA6", "mosi": "PA7"
             },
             "gate_reader": {
                 "driver": "rc522",
-                "bus": "spi1",
-                "cs": "PA4"
+                "cs": "PA4",
+                "sck": "PA5", "miso": "PA6", "mosi": "PA7"
             }
         }
     })";
-    auto proj = *loadProject(*json::parse(text));
+    auto st = makeStateFromProject(text, lib);
+    REQUIRE(st.ok());
 
     CapabilityChecker checker(lib, chip);
-    auto report = checker.check(proj);
+    auto report = checker.check(*st);
 
     REQUIRE_FALSE(report.ok());
     bool hasConflict = false;
@@ -162,36 +174,40 @@ TEST_CASE("pin conflict detected", "[capability]") {
 
 TEST_CASE("shareable pins can be reused", "[capability]") {
     auto chip = makeChip();
-    auto lib = makeLib();
+    auto lib  = makeLib();
 
-    // 两个 rc522 共用 SPI1 的 SCK/MISO/MOSI，各自 CS 不同
+    // 两个 rc522 共用 SPI，CS 不同
     const char* text = R"({
         "mcu": "stm32f103c8t6",
         "devices": {
-            "spi1": {
-                "driver": "spi",
-                "sck": "PA5",
-                "miso": "PA6",
-                "mosi": "PA7"
-            },
             "door_reader": {
                 "driver": "rc522",
-                "bus": "spi1",
-                "cs": "PA4"
+                "cs": "PA4",
+                "sck": "PA5", "miso": "PA6", "mosi": "PA7"
+            },
+            "gate_reader": {
+                "driver": "rc522",
+                "cs": "PA8",
+                "sck": "PA5", "miso": "PA6", "mosi": "PA7"
             }
         }
     })";
-    auto proj = *loadProject(*json::parse(text));
+    auto st = makeStateFromProject(text, lib);
+    REQUIRE(st.ok());
 
     CapabilityChecker checker(lib, chip);
-    auto report = checker.check(proj);
+    auto report = checker.check(*st);
+
+    for (const auto& e : report.errors()) {
+        INFO("error: " << e.message);
+    }
     REQUIRE(report.ok());
 }
 
 TEST_CASE("method capability checked", "[capability]") {
     DriverLibrary lib;
 
-    // rc522 要求下层提供 transfer
+    // rc522 要 bus.transfer
     {
         const char* text = R"({
             "name": "rc522",
@@ -201,7 +217,7 @@ TEST_CASE("method capability checked", "[capability]") {
         })";
         lib.add(*loadDriverManifest(*json::parse(text)));
     }
-    // 假设有个坏的 spi 驱动，不提供 transfer
+    // 坏 spi：不提供 transfer
     {
         const char* text = R"({
             "name": "spi",
@@ -214,15 +230,30 @@ TEST_CASE("method capability checked", "[capability]") {
     const char* text = R"({
         "mcu": "stm32f103c8t6",
         "devices": {
-            "spi1": { "driver": "spi" },
             "door_reader": { "driver": "rc522", "bus": "spi1" }
         }
     })";
-    auto proj = *loadProject(*json::parse(text));
+    auto j = json::parse(text);
+    auto proj = loadProject(*j);
+    REQUIRE(proj.ok());
+
+    // 直接用 Project 检查（旧重载），bus 当引脚处理不了，我们改用 DriverState
+    DriverState st;
+    Device dr;
+    dr.name = "door_reader";
+    dr.driver = "rc522";
+    dr.bindings["bus"] = "__spi_a3f2";
+    st.userDevices.push_back(dr);
+
+    IntermediateDevice idev;
+    idev.id = "__spi_a3f2";
+    idev.name = "__spi_a3f2";
+    idev.driver = "spi";
+    st.intermediateDevices.push_back(idev);
 
     auto chip = makeChip();
     CapabilityChecker checker(lib, chip);
-    auto report = checker.check(proj);
+    auto report = checker.check(st);
 
     REQUIRE_FALSE(report.ok());
     bool found = false;
@@ -234,19 +265,27 @@ TEST_CASE("method capability checked", "[capability]") {
 
 TEST_CASE("missing required resource", "[capability]") {
     auto chip = makeChip();
-    auto lib = makeLib();
+    auto lib  = makeLib();
 
-    // rc522 没有 cs
-    const char* text = R"({
-        "mcu": "stm32f103c8t6",
-        "devices": {
-            "door_reader": { "driver": "rc522", "bus": "spi1" }
-        }
-    })";
-    auto proj = *loadProject(*json::parse(text));
+    // door_reader 有 bus，但没有 cs
+    DriverState st;
+    Device dr;
+    dr.name = "door_reader";
+    dr.driver = "rc522";
+    dr.bindings["bus"] = "__spi_a3f2";
+    st.userDevices.push_back(dr);
+
+    IntermediateDevice idev;
+    idev.id = "__spi_a3f2";
+    idev.name = "__spi_a3f2";
+    idev.driver = "spi";
+    idev.bindings["sck"]  = "PA5";
+    idev.bindings["miso"] = "PA6";
+    idev.bindings["mosi"] = "PA7";
+    st.intermediateDevices.push_back(idev);
 
     CapabilityChecker checker(lib, chip);
-    auto report = checker.check(proj);
+    auto report = checker.check(st);
 
     REQUIRE_FALSE(report.ok());
     bool found = false;
@@ -258,23 +297,31 @@ TEST_CASE("missing required resource", "[capability]") {
 
 TEST_CASE("duplicate device name", "[capability]") {
     auto chip = makeChip();
-    auto lib = makeLib();
+    auto lib  = makeLib();
 
-    Project proj;
-    proj.mcu = "stm32f103c8t6";
+    DriverState st;
 
     Device d1;
     d1.name = "dup";
     d1.driver = "rc522";
-    d1.bindings["bus"] = "spi1";
-    d1.bindings["cs"] = "PA4";
+    d1.bindings["bus"] = "__spi_a3f2";
+    d1.bindings["cs"]  = "PA4";
 
     Device d2 = d1;
 
-    proj.devices = {d1, d2};
+    st.userDevices = {d1, d2};
+
+    IntermediateDevice idev;
+    idev.id = "__spi_a3f2";
+    idev.name = "__spi_a3f2";
+    idev.driver = "spi";
+    idev.bindings["sck"]  = "PA5";
+    idev.bindings["miso"] = "PA6";
+    idev.bindings["mosi"] = "PA7";
+    st.intermediateDevices.push_back(idev);
 
     CapabilityChecker checker(lib, chip);
-    auto report = checker.check(proj);
+    auto report = checker.check(st);
 
     REQUIRE_FALSE(report.ok());
     bool found = false;

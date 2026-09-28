@@ -36,9 +36,31 @@ struct DriverState {
     // 中间设备（工具生成）
     std::vector<IntermediateDevice> intermediateDevices;
 
-    // 便捷查询
+    // 便捷查询：按用户设备名查找
+    const Device* findUserDevice(const DeviceName& name) const {
+        for (const auto& d : userDevices) {
+            if (d.name == name) return &d;
+        }
+        return nullptr;
+    }
+
+    Device* findUserDevice(const DeviceName& name) {
+        for (auto& d : userDevices) {
+            if (d.name == name) return &d;
+        }
+        return nullptr;
+    }
+
+    // 便捷查询：按中间设备 id 或 name 查找
     const IntermediateDevice* findIntermediate(const DeviceName& id) const {
         for (const auto& d : intermediateDevices) {
+            if (d.id == id || d.name == id) return &d;
+        }
+        return nullptr;
+    }
+
+    IntermediateDevice* findIntermediate(const DeviceName& id) {
+        for (auto& d : intermediateDevices) {
             if (d.id == id || d.name == id) return &d;
         }
         return nullptr;

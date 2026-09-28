@@ -15,7 +15,6 @@
 // core/src/capability/capability_checker.cpp
 #include <hpm/capability/capability_checker.h>
 
-#include <hpm/capability/method_resolver.h>
 #include <hpm/capability/pin_allocator.h>
 #include <hpm/capability/pin_matcher.h>
 
@@ -23,36 +22,66 @@
 
 namespace hpm {
 
+// ─────────────────────────────────────────────
+// 便捷重载：Project → 临时 DriverState
+// ─────────────────────────────────────────────
+
 CheckReport CapabilityChecker::check(const Project& project) const {
+    DriverState state;
+    state.userDevices = project.devices;
+    return check(state);
+}
+
+// ─────────────────────────────────────────────
+// 主入口
+// ─────────────────────────────────────────────
+
+CheckReport CapabilityChecker::check(const DriverState& state) const {
     CheckReport report;
 
-    // 0. 名字唯一性
-    checkNames(project, report);
+    checkNames(state, report);
 
-    // 1. 引脚分配
     PinAllocator allocator(chip_);
 
-    for (const auto& device : project.devices) {
-        checkDevice(project, device, allocator, report);
+    for (const auto& d : state.userDevices) {
+        checkDevice(state, d, allocator, report);
+    }
+    for (const auto& d : state.intermediateDevices) {
+        checkIntermediate(state, d, allocator, report);
     }
 
     return report;
 }
 
-void CapabilityChecker::checkNames(const Project& project,
+// ─────────────────────────────────────────────
+// 名字唯一性
+// ─────────────────────────────────────────────
+
+void CapabilityChecker::checkNames(const DriverState& state,
                                    CheckReport& report) const {
-    std::set<DeviceName> seen;
-    for (const auto& d : project.devices) {
-        if (seen.count(d.name)) {
+    std::set<std::string> seen;
+
+    auto checkName = [&](const std::string& name, const std::string& location) {
+        if (seen.count(name)) {
             report.addError(ErrorCode::NameConflict,
-                            "设备名重复: " + d.name,
-                            "devices." + d.name);
+                            "设备名重复: " + name, location);
         }
-        seen.insert(d.name);
+        seen.insert(name);
+    };
+
+    for (const auto& d : state.userDevices) {
+        checkName(d.name, "devices." + d.name);
+    }
+    for (const auto& d : state.intermediateDevices) {
+        checkName(d.name, "devices." + d.name);
     }
 }
 
-void CapabilityChecker::checkDevice(const Project& project,
+// ─────────────────────────────────────────────
+// 用户设备
+// ─────────────────────────────────────────────
+
+void CapabilityChecker::checkDevice(const DriverState& state,
                                     const Device& device,
                                     PinAllocator& allocator,
                                     CheckReport& report) const {
@@ -65,10 +94,8 @@ void CapabilityChecker::checkDevice(const Project& project,
         return;
     }
 
-    MethodResolver methodResolver(lib_);
-    PinMatcher     pinMatcher(chip_);
+    PinMatcher pinMatcher(chip_);
 
-    // 遍历驱动的每个 requires
     for (const auto& req : dm->requirements) {
         auto it = device.bindings.find(req.key);
 
@@ -83,19 +110,100 @@ void CapabilityChecker::checkDevice(const Project& project,
         }
 
         const std::string& value = it->second;
+        const std::string location = "devices." + device.name + "." + req.key;
 
-        // value 可能是引脚名（PA4）或设备名（spi1）
-        // 先看它是不是本项目里的设备名
-        const Device* targetDev = project.findDevice(value);
-
-        if (targetDev) {
-            // 引用另一个设备：检查方法能力
-            methodResolver.check(device.name, req.key, req, *targetDev, report);
-        } else {
-            // 当作引脚名处理
-            pinMatcher.check(value, req, device.name, report);
-            allocator.allocate(value, device.name, req.key, report);
+        // 1) 引用了另一个用户设备
+        if (const Device* target = state.findUserDevice(value)) {
+            const DriverManifest* tdm = lib_.find(target->driver);
+            if (!tdm) continue;
+            for (const auto& m : req.methods) {
+                if (!tdm->providesMethod(m)) {
+                    report.addError(ErrorCode::MethodNotFound,
+                                    "驱动 " + target->driver +
+                                        "（设备 " + target->name +
+                                        "）未提供方法 " + m,
+                                    location);
+                }
+            }
+            continue;
         }
+
+        // 2) 引用了中间设备
+        if (const IntermediateDevice* target = state.findIntermediate(value)) {
+            const DriverManifest* tdm = lib_.find(target->driver);
+            if (!tdm) continue;
+            for (const auto& m : req.methods) {
+                if (!tdm->providesMethod(m)) {
+                    report.addError(ErrorCode::MethodNotFound,
+                                    "驱动 " + target->driver +
+                                        "（中间设备 " + target->name +
+                                        "）未提供方法 " + m,
+                                    location);
+                }
+            }
+            continue;
+        }
+
+        // 3) 否则当作引脚
+        pinMatcher.check(value, req, device.name, report);
+        allocator.allocate(value, device.name, req.key, report);
+    }
+}
+
+// ─────────────────────────────────────────────
+// 中间设备
+// ─────────────────────────────────────────────
+
+void CapabilityChecker::checkIntermediate(const DriverState& state,
+                                          const IntermediateDevice& device,
+                                          PinAllocator& allocator,
+                                          CheckReport& report) const {
+    const DriverManifest* dm = lib_.find(device.driver);
+    if (!dm) {
+        report.addError(ErrorCode::NotFound,
+                        "找不到驱动: " + device.driver +
+                            "（中间设备 " + device.name + "）",
+                        "devices." + device.name);
+        return;
+    }
+
+    PinMatcher pinMatcher(chip_);
+
+    for (const auto& req : dm->requirements) {
+        auto it = device.bindings.find(req.key);
+
+        if (it == device.bindings.end()) {
+            if (!req.optional) {
+                report.addError(ErrorCode::MissingField,
+                                "中间设备 " + device.name +
+                                    " 缺少必填资源: " + req.key,
+                                "devices." + device.name);
+            }
+            continue;
+        }
+
+        const std::string& value = it->second;
+        const std::string location = "devices." + device.name + "." + req.key;
+
+        // 中间设备通常直接绑引脚，也可能引用别的中间设备
+        if (const IntermediateDevice* target = state.findIntermediate(value)) {
+            const DriverManifest* tdm = lib_.find(target->driver);
+            if (!tdm) continue;
+            for (const auto& m : req.methods) {
+                if (!tdm->providesMethod(m)) {
+                    report.addError(ErrorCode::MethodNotFound,
+                                    "驱动 " + target->driver +
+                                        "（中间设备 " + target->name +
+                                        "）未提供方法 " + m,
+                                    location);
+                }
+            }
+            continue;
+        }
+
+        // 引脚
+        pinMatcher.check(value, req, device.name, report);
+        allocator.allocate(value, device.name, req.key, report);
     }
 }
 

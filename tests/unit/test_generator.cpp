@@ -15,7 +15,9 @@
 // tests/unit/test_generator.cpp
 #include <catch2/catch_test_macros.hpp>
 #include <hpm/generator/generator.h>
+#include <hpm/generator/template_engine.h>
 #include <hpm/json/json_io.h>
+#include <hpm/manifest/chip_loader.h>
 #include <hpm/manifest/driver_loader.h>
 
 #include <filesystem>
@@ -24,6 +26,30 @@
 using namespace hpm;
 using namespace hpm::manifest;
 namespace fs = std::filesystem;
+
+// ─────────────────────────────────────────────
+// 模板引擎
+// ─────────────────────────────────────────────
+
+TEST_CASE("template engine basic", "[generator]") {
+    std::map<std::string, std::string> vars = {
+        {"DEVICE_NAME", "door_reader"},
+        {"bus", "__spi_a3f2"},
+    };
+    auto out = renderTemplate(
+        "int {{DEVICE_NAME}}_init(void);  // bus={{bus}}", vars);
+    REQUIRE(out == "int door_reader_init(void);  // bus=__spi_a3f2");
+}
+
+TEST_CASE("template engine unknown key", "[generator]") {
+    std::map<std::string, std::string> vars = {{"a", "1"}};
+    auto out = renderTemplate("{{a}} {{b}}", vars);
+    REQUIRE(out == "1 {{b}}");
+}
+
+// ─────────────────────────────────────────────
+// 测试夹具
+// ─────────────────────────────────────────────
 
 namespace {
 
@@ -55,25 +81,18 @@ DriverLibrary makeLib() {
         })";
         lib.add(*loadDriverManifest(*json::parse(text)));
     }
-    {
-        const char* text = R"({
-            "name": "stm32f103c8t6",
-            "version": "1.0.0",
-            "provides": { "methods": ["init"] }
-        })";
-        lib.add(*loadDriverManifest(*json::parse(text)));
-    }
     return lib;
 }
 
 DriverState makeState() {
     DriverState s;
+
     Device dr;
     dr.name = "door_reader";
     dr.driver = "rc522";
     dr.version = *Version::parse("1.2.0");
     dr.bindings["bus"] = "__spi_a3f2";
-    dr.bindings["cs"] = "PA4";
+    dr.bindings["cs"]  = "PA4";
     dr.bindings["rst"] = "PA3";
     s.userDevices.push_back(dr);
 
@@ -82,7 +101,7 @@ DriverState makeState() {
     idev.name = "__spi_a3f2";
     idev.driver = "spi";
     idev.version = *Version::parse("1.0.0");
-    idev.bindings["sck"] = "PA5";
+    idev.bindings["sck"]  = "PA5";
     idev.bindings["miso"] = "PA6";
     idev.bindings["mosi"] = "PA7";
     s.intermediateDevices.push_back(idev);
@@ -96,8 +115,15 @@ Project makeProject() {
     return p;
 }
 
-// 造假的驱动包
+Chip makeChip() {
+    Chip c;
+    c.name = "stm32f103c8t6";
+    return c;
+}
+
+// 造假的驱动包 + 芯片包
 void setupFakePackages(const fs::path& root) {
+    // rc522-1.2.0
     {
         auto d = root / "rc522-1.2.0";
         fs::create_directories(d / "src");
@@ -105,6 +131,7 @@ void setupFakePackages(const fs::path& root) {
         std::ofstream(d / "src" / "rc522.c") << "// rc522 driver\n";
         std::ofstream(d / "include" / "rc522.h") << "// rc522 header\n";
     }
+    // spi-1.0.0
     {
         auto d = root / "spi-1.0.0";
         fs::create_directories(d / "src");
@@ -112,31 +139,45 @@ void setupFakePackages(const fs::path& root) {
         std::ofstream(d / "src" / "spi.c") << "// spi driver\n";
         std::ofstream(d / "include" / "spi.h") << "// spi header\n";
     }
+    // stm32f103c8t6-1.0.0（芯片驱动包）
     {
         auto d = root / "stm32f103c8t6-1.0.0";
         fs::create_directories(d / "src");
         fs::create_directories(d / "include");
+        std::ofstream(d / "chip.json") << R"({
+            "name": "stm32f103c8t6",
+            "toolchain": { "name": "gcc" },
+            "flash": { "tool": "echo" },
+            "pins": {}
+        })";
         std::ofstream(d / "src" / "stm32f103c8t6.c") << "// chip driver\n";
+        std::ofstream(d / "src" / "hpm_pin.c") << "// pin driver\n";
         std::ofstream(d / "include" / "stm32f103c8t6.h") << "// chip header\n";
+        std::ofstream(d / "include" / "hpm_pin.h") << "// pin header\n";
     }
 }
 
 } // namespace
 
+// ─────────────────────────────────────────────
+// 生成计划
+// ─────────────────────────────────────────────
+
 TEST_CASE("generator creates per-instance dirs", "[generator]") {
-    auto lib = makeLib();
+    auto lib   = makeLib();
     auto state = makeState();
-    auto proj = makeProject();
+    auto proj  = makeProject();
+    auto chip  = makeChip();
+
     auto tmp = fs::temp_directory_path() / "hpm_gen_test";
     fs::remove_all(tmp);
     setupFakePackages(tmp / "packages");
 
-    Generator gen(state, lib, proj, tmp / "packages", tmp / "driver",
-                  "stm32f103c8t6");
+    Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
     auto plan = gen.plan();
     REQUIRE(plan.ok());
 
-    // 检查实例目录和 hpm_dev.h
+    // door_reader/hpm_dev.h
     bool foundDoorReaderMacro = false;
     for (const auto& f : plan->files) {
         if (f.relativePath == "door_reader/hpm_dev.h") {
@@ -149,6 +190,7 @@ TEST_CASE("generator creates per-instance dirs", "[generator]") {
     }
     REQUIRE(foundDoorReaderMacro);
 
+    // __spi_a3f2/hpm_dev.h
     bool foundSpiMacro = false;
     for (const auto& f : plan->files) {
         if (f.relativePath == "__spi_a3f2/hpm_dev.h") {
@@ -164,18 +206,14 @@ TEST_CASE("generator creates per-instance dirs", "[generator]") {
     // 驱动源码被拷贝到实例目录
     bool foundRc522Src = false;
     for (const auto& f : plan->files) {
-        if (f.relativePath == "door_reader/rc522.c") {
-            foundRc522Src = true;
-        }
+        if (f.relativePath == "door_reader/rc522.c") foundRc522Src = true;
     }
     REQUIRE(foundRc522Src);
 
     // 芯片驱动目录
     bool foundChip = false;
     for (const auto& f : plan->files) {
-        if (f.relativePath == "stm32f103c8t6/stm32f103c8t6.c") {
-            foundChip = true;
-        }
+        if (f.relativePath == "stm32f103c8t6/stm32f103c8t6.c") foundChip = true;
     }
     REQUIRE(foundChip);
 
@@ -183,15 +221,16 @@ TEST_CASE("generator creates per-instance dirs", "[generator]") {
 }
 
 TEST_CASE("generator driver.h has user API", "[generator]") {
-    auto lib = makeLib();
+    auto lib   = makeLib();
     auto state = makeState();
-    auto proj = makeProject();
+    auto proj  = makeProject();
+    auto chip  = makeChip();
+
     auto tmp = fs::temp_directory_path() / "hpm_gen_api_test";
     fs::remove_all(tmp);
     setupFakePackages(tmp / "packages");
 
-    Generator gen(state, lib, proj, tmp / "packages", tmp / "driver",
-                  "stm32f103c8t6");
+    Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
     auto plan = gen.plan();
     REQUIRE(plan.ok());
 
@@ -205,16 +244,47 @@ TEST_CASE("generator driver.h has user API", "[generator]") {
     fs::remove_all(tmp);
 }
 
-TEST_CASE("generator writes files to disk", "[generator]") {
-    auto lib = makeLib();
+TEST_CASE("generator Makefile includes all sources", "[generator]") {
+    auto lib   = makeLib();
     auto state = makeState();
-    auto proj = makeProject();
+    auto proj  = makeProject();
+    auto chip  = makeChip();
+
+    auto tmp = fs::temp_directory_path() / "hpm_gen_makefile_test";
+    fs::remove_all(tmp);
+    setupFakePackages(tmp / "packages");
+
+    Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
+    auto plan = gen.plan();
+    REQUIRE(plan.ok());
+
+    bool foundMakefile = false;
+    for (const auto& f : plan->files) {
+        if (f.relativePath == "Makefile") {
+            foundMakefile = true;
+            REQUIRE(f.content.find("door_reader/rc522.c") != std::string::npos);
+            REQUIRE(f.content.find("__spi_a3f2/spi.c") != std::string::npos);
+            REQUIRE(f.content.find("stm32f103c8t6/stm32f103c8t6.c") != std::string::npos);
+            REQUIRE(f.content.find("-Idoor_reader") != std::string::npos);
+            REQUIRE(f.content.find("-I__spi_a3f2") != std::string::npos);
+        }
+    }
+    REQUIRE(foundMakefile);
+
+    fs::remove_all(tmp);
+}
+
+TEST_CASE("generator writes files to disk", "[generator]") {
+    auto lib   = makeLib();
+    auto state = makeState();
+    auto proj  = makeProject();
+    auto chip  = makeChip();
+
     auto tmp = fs::temp_directory_path() / "hpm_gen_write_test";
     fs::remove_all(tmp);
     setupFakePackages(tmp / "packages");
 
-    Generator gen(state, lib, proj, tmp / "packages", tmp / "driver",
-                  "stm32f103c8t6");
+    Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
     auto st = gen.generate();
     REQUIRE(st.ok());
 
@@ -226,20 +296,51 @@ TEST_CASE("generator writes files to disk", "[generator]") {
     REQUIRE(fs::exists(tmp / "driver" / "__spi_a3f2" / "hpm_dev.h"));
     REQUIRE(fs::exists(tmp / "driver" / "__spi_a3f2" / "spi.c"));
     REQUIRE(fs::exists(tmp / "driver" / "stm32f103c8t6" / "stm32f103c8t6.c"));
+    REQUIRE(fs::exists(tmp / "driver" / "stm32f103c8t6" / "hpm_pin.c"));
 
     fs::remove_all(tmp);
 }
 
 TEST_CASE("generator missing package", "[generator]") {
-    auto lib = makeLib();
+    auto lib   = makeLib();
     auto state = makeState();
-    auto proj = makeProject();
+    auto proj  = makeProject();
+    auto chip  = makeChip();
+
     auto tmp = fs::temp_directory_path() / "hpm_gen_missing_test";
     fs::remove_all(tmp);
     // 不建 packages
 
-    Generator gen(state, lib, proj, tmp / "packages", tmp / "driver",
-                  "stm32f103c8t6");
+    Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
+    auto plan = gen.plan();
+    REQUIRE_FALSE(plan.ok());
+    REQUIRE(plan.error().code() == ErrorCode::NotFound);
+
+    fs::remove_all(tmp);
+}
+
+TEST_CASE("generator missing chip package", "[generator]") {
+    auto lib   = makeLib();
+    auto state = makeState();
+    auto proj  = makeProject();
+    auto chip  = makeChip();
+
+    auto tmp = fs::temp_directory_path() / "hpm_gen_missing_chip_test";
+    fs::remove_all(tmp);
+
+    // 只建 rc522 和 spi，不建芯片包
+    {
+        auto d = tmp / "packages" / "rc522-1.2.0";
+        fs::create_directories(d / "src");
+        std::ofstream(d / "src" / "rc522.c") << "// rc522\n";
+    }
+    {
+        auto d = tmp / "packages" / "spi-1.0.0";
+        fs::create_directories(d / "src");
+        std::ofstream(d / "src" / "spi.c") << "// spi\n";
+    }
+
+    Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
     auto plan = gen.plan();
     REQUIRE_FALSE(plan.ok());
     REQUIRE(plan.error().code() == ErrorCode::NotFound);

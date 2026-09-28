@@ -21,14 +21,15 @@
 #include <hpm/capability/capability_checker.h>
 #include <hpm/capability/driver_library.h>
 #include <hpm/generator/generator.h>
+#include <hpm/json/json_io.h>
 #include <hpm/manifest/chip_loader.h>
 #include <hpm/manifest/driver_loader.h>
 #include <hpm/manifest/project_loader.h>
 #include <hpm/manifest/state_loader.h>
 #include <hpm/resolver/resolver.h>
-#include <hpm/json/json_io.h>
 
 #include <filesystem>
+#include <optional>
 
 namespace hpm::cli {
 
@@ -39,12 +40,10 @@ namespace fs = std::filesystem;
 // 从本地包目录加载芯片驱动
 Result<Chip> loadChipFromCache(const fs::path& packagesDir,
                                 const std::string& mcu) {
-    // 扫描 <mcu>-* 目录，找 chip.json
     if (!fs::exists(packagesDir)) {
         return Error(ErrorCode::NotFound,
                      "包目录不存在: " + packagesDir.string());
     }
-
     for (const auto& entry : fs::directory_iterator(packagesDir)) {
         if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
@@ -59,8 +58,7 @@ Result<Chip> loadChipFromCache(const fs::path& packagesDir,
                  "未找到芯片驱动: " + mcu + "（在 " + packagesDir.string() + " 下）");
 }
 
-// 收集驱动库：project 里的所有设备驱动 + 它们的依赖递归
-// 简化：先扫 packages 目录里所有 manifest.json，全部加载
+// 扫 packages 目录里所有 manifest.json，全部加载
 DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
     DriverLibrary lib;
     if (!fs::exists(packagesDir)) return lib;
@@ -131,10 +129,10 @@ int SyncCmd::run(CmdContext& ctx) {
     Output::detail("用户设备: " + std::to_string(state->userDevices.size()));
     Output::detail("中间设备: " + std::to_string(state->intermediateDevices.size()));
 
-    // 6. 能力检查
+    // 6. 能力检查（在展开后的状态上检查）
     Output::step("能力检查");
     CapabilityChecker checker(lib, *chip);
-    auto report = checker.check(*proj);
+    auto report = checker.check(*state);
     if (!report.ok()) {
         Output::error(report.toError().message());
         return 1;
@@ -161,8 +159,7 @@ int SyncCmd::run(CmdContext& ctx) {
 
     // 8. 生成 driver/
     Output::step("生成 driver/");
-    Generator gen(*state, lib, *proj, ctx.packagesDir(), ctx.driverDir(),
-                  proj->mcu);
+    Generator gen(*state, lib, *proj, *chip, ctx.packagesDir(), ctx.driverDir());
     auto genSt = gen.generate();
     if (!genSt.ok()) {
         Output::error(genSt.error().message());

@@ -24,23 +24,6 @@
 
 namespace hpm {
 
-namespace {
-
-// 收集所有用到的驱动（driver + version），去重
-std::set<std::pair<std::string, std::string>>
-collectDriverKeys(const DriverState& state) {
-    std::set<std::pair<std::string, std::string>> out;
-    for (const auto& d : state.userDevices) {
-        out.insert({d.driver, d.version.toString()});
-    }
-    for (const auto& d : state.intermediateDevices) {
-        out.insert({d.driver, d.version.toString()});
-    }
-    return out;
-}
-
-} // namespace
-
 // ─────────────────────────────────────────────
 // 公共
 // ─────────────────────────────────────────────
@@ -51,14 +34,12 @@ Result<GenerationPlan> Generator::plan() {
     planDriverHeader(p);
     planDriverSource(p);
 
-    // 为每个实例生成目录
     for (const auto& inst : collectInstances()) {
         auto st = planInstance(p, inst.instanceName, inst.driver,
                                inst.version, inst.bindings);
         if (!st.ok()) return st.error();
     }
 
-    // 芯片驱动
     auto st = planChipDriver(p);
     if (!st.ok()) return st.error();
 
@@ -92,12 +73,11 @@ Status Generator::generate() {
 }
 
 // ─────────────────────────────────────────────
-// 实例收集
+// 实例
 // ─────────────────────────────────────────────
 
 std::vector<Generator::InstanceInfo> Generator::collectInstances() const {
     std::vector<InstanceInfo> out;
-
     for (const auto& d : state_.userDevices) {
         out.push_back({d.name, d.driver, d.version, d.bindings});
     }
@@ -107,24 +87,18 @@ std::vector<Generator::InstanceInfo> Generator::collectInstances() const {
     return out;
 }
 
-// ─────────────────────────────────────────────
-// 宏值计算
-// ─────────────────────────────────────────────
-
 std::string Generator::macroValue(const std::string& v) const {
-    // 如果这个值是某个实例名（用户设备或中间设备），直接用
     for (const auto& d : state_.userDevices) {
         if (d.name == v) return v;
     }
     for (const auto& d : state_.intermediateDevices) {
         if (d.name == v) return v;
     }
-    // 否则当作引脚名，加前缀
     return "hpm_pin_" + v;
 }
 
 // ─────────────────────────────────────────────
-// 用户 API 头
+// driver.h
 // ─────────────────────────────────────────────
 
 void Generator::planDriverHeader(GenerationPlan& plan) {
@@ -135,24 +109,19 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
     out << "#include <stddef.h>\n\n";
     out << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
 
-    // include 每个驱动实例的头
     for (const auto& dev : state_.userDevices) {
         out << "#include \"" << dev.name << "/" << dev.driver << ".h\"\n";
     }
     out << "\n";
 
-    // 声明每个用户设备的 API
     for (const auto& dev : state_.userDevices) {
         out << "// ---------- " << dev.name << " (" << dev.driver << ") ----------\n";
-
         const DriverManifest* dm = lib_.find(dev.driver);
         if (!dm) continue;
 
-        // 从 provides 里生成声明
         for (const auto& m : dm->provides) {
             out << "int " << dev.name << "_" << m.name << "(void);\n";
         }
-        // 如果没有 provides.init，补一个
         if (!dm->providesMethod("init")) {
             out << "int " << dev.name << "_init(void);\n";
         }
@@ -165,14 +134,13 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
 }
 
 // ─────────────────────────────────────────────
-// 胶水 driver.c
+// driver.c
 // ─────────────────────────────────────────────
 
 void Generator::planDriverSource(GenerationPlan& plan) {
     std::ostringstream out;
     out << "// 由 HPM 自动生成，请勿手动修改\n";
     out << "#include \"driver.h\"\n\n";
-
     out << "void hpm_init_all(void) {\n";
     for (const auto& dev : state_.userDevices) {
         out << "    " << dev.name << "_init();\n";
@@ -195,7 +163,7 @@ Status Generator::planInstance(GenerationPlan& plan,
 
     fs::path instDir = instanceName;
 
-    // 1. 生成 hpm_dev.h
+    // hpm_dev.h
     {
         std::ostringstream out;
         out << "// 由 HPM 自动生成，请勿手动修改\n";
@@ -207,7 +175,7 @@ Status Generator::planInstance(GenerationPlan& plan,
         plan.addFile(instDir / "hpm_dev.h", out.str());
     }
 
-    // 2. 拷贝驱动源码到实例目录
+    // 拷贝驱动源码
     auto st = copyPackageSources(plan, driverName, version, instDir);
     if (!st.ok()) return st.error();
 
@@ -215,7 +183,7 @@ Status Generator::planInstance(GenerationPlan& plan,
 }
 
 // ─────────────────────────────────────────────
-// 拷贝驱动包源码
+// 拷贝包源码
 // ─────────────────────────────────────────────
 
 Status Generator::copyPackageSources(GenerationPlan& plan,
@@ -230,7 +198,6 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
                      "驱动包未找到: " + pkgDir.string());
     }
 
-    // 拷贝 src/ 和 include/ 下的所有文件到 targetDir/
     for (const char* sub : {"src", "include"}) {
         auto dir = pkgDir / sub;
         if (!fs::exists(dir)) continue;
@@ -258,19 +225,49 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
 Status Generator::planChipDriver(GenerationPlan& plan) {
     namespace fs = std::filesystem;
 
-    // 芯片驱动名 = project_.mcu（约定）
-    // 版本：从驱动库里找
-    const DriverManifest* dm = lib_.find(chipDriverName_);
-    if (!dm) {
+    // 在 packageCacheDir_ 下找 <chipName>-* 目录
+    if (!fs::exists(packageCacheDir_)) {
         return Error(ErrorCode::NotFound,
-                     "找不到芯片驱动: " + chipDriverName_);
+                     "包目录不存在: " + packageCacheDir_.string());
     }
 
-    fs::path chipDir = chipDriverName_;
+    fs::path chipPkgDir;
+    for (const auto& entry : fs::directory_iterator(packageCacheDir_)) {
+        if (!entry.is_directory()) continue;
+        auto name = entry.path().filename().string();
+        if (name.rfind(chip_.name + "-", 0) != 0) continue;
 
-    // 拷贝芯片驱动源码
-    auto st = copyPackageSources(plan, chipDriverName_, dm->version, chipDir);
-    if (!st.ok()) return st.error();
+        if (fs::exists(entry.path() / "chip.json")) {
+            chipPkgDir = entry.path();
+            break;
+        }
+    }
+
+    if (chipPkgDir.empty()) {
+        return Error(ErrorCode::NotFound,
+                     "未找到芯片驱动包: " + chip_.name +
+                         "（在 " + packageCacheDir_.string() + " 下）");
+    }
+
+    fs::path chipTargetDir = chip_.name;
+
+    // 拷贝 src/ 和 include/
+    for (const char* sub : {"src", "include"}) {
+        auto dir = chipPkgDir / sub;
+        if (!fs::exists(dir)) continue;
+
+        for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+
+            auto rel = fs::relative(entry.path(), dir);
+            auto target = chipTargetDir / rel;
+
+            auto content = util::readFile(entry.path());
+            if (!content) return content.error();
+
+            plan.addFile(target, *content);
+        }
+    }
 
     return {};
 }
@@ -286,18 +283,15 @@ void Generator::planMakefile(GenerationPlan& plan) {
     out << "CC ?= arm-none-eabi-gcc\n";
     out << "OBJCOPY ?= arm-none-eabi-objcopy\n\n";
 
-    // 源文件列表
+    // ── SRCS ──
     std::vector<std::string> srcs;
     srcs.push_back("driver.c");
-
     for (const auto& inst : collectInstances()) {
-        // 实例目录里的 .c 文件
-        // 约定：驱动包里 src/<driver>.c 被拷到 <instance>/<driver>.c
         srcs.push_back(inst.instanceName + "/" + inst.driver + ".c");
     }
-
-    // 芯片驱动的 .c 文件（假设 <chip>/<chip>.c + <chip>/hpm_pin_*.c）
-    srcs.push_back(chipDriverName_ + "/" + chipDriverName_ + ".c");
+    srcs.push_back(chip_.name + "/" + chip_.name + ".c");
+    srcs.push_back(chip_.name + "/hpm_pin.c");
+    srcs.push_back("../main.c");
 
     out << "SRCS := \\\n";
     for (size_t i = 0; i < srcs.size(); ++i) {
@@ -307,23 +301,24 @@ void Generator::planMakefile(GenerationPlan& plan) {
     }
     out << "\n";
 
-    // include 路径
-    out << "INCLUDES := -I. -I" << chipDriverName_ << " \\\n";
+    // ── INCLUDES ──
+    std::vector<std::string> includes;
+    includes.push_back(".");
+    includes.push_back(chip_.name);
     for (const auto& inst : collectInstances()) {
-        out << "    -I" << inst.instanceName << " \\\n";
+        includes.push_back(inst.instanceName);
     }
-    // 去掉最后一个续行
-    {
-        std::string s = out.str();
-        if (s.size() >= 3 && s.substr(s.size() - 3) == " \\\n") {
-            s = s.substr(0, s.size() - 3) + "\n";
-        }
-        out.str(s);
-        out.clear();
+
+    out << "INCLUDES := \\\n";
+    for (size_t i = 0; i < includes.size(); ++i) {
+        out << "    -I" << includes[i];
+        if (i + 1 < includes.size()) out << " \\";
+        out << "\n";
     }
     out << "\n";
 
-    out << "CFLAGS := -std=c11 -Wall -Wextra -Os $(INCLUDES)\n";
+    // ── 编译选项 ──
+    out << "CFLAGS := -std=gnu11 -Wall -Wextra -Wno-implicit-function-declaration -Os $(INCLUDES)\n";
     out << "LDFLAGS :=\n\n";
 
     out << "BUILD_DIR := ../build\n";

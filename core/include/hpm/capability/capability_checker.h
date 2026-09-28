@@ -20,28 +20,42 @@
 #include <hpm/capability/check_report.h>
 #include <hpm/capability/driver_library.h>
 #include <hpm/model/chip.h>
+#include <hpm/model/driver_state.h>
 #include <hpm/model/project.h>
 
 namespace hpm {
 
 // 能力检查总调度
+// 主入口接受 DriverState（已展开的中间设备）
+// 另提供一个从 Project 构造临时 state 的重载（兼容旧调用）
 class CapabilityChecker {
 public:
     CapabilityChecker(const DriverLibrary& lib, const Chip& chip)
         : lib_(lib), chip_(chip) {}
 
-    // 检查整个项目，返回报告（不抛异常，不返回值错误）
+    // 主入口：检查整个状态
+    CheckReport check(const DriverState& state) const;
+
+    // 兼容：把 Project 的 devices 直接当 userDevices 检查
+    // 注意：不会展开中间设备，所以引用中间设备的 requires 会被当作引脚
+    // 建议先用 resolver 展开，再调上面的 check(state)
     CheckReport check(const Project& project) const;
 
 private:
-    // 单设备检查：遍历它的每个 requires key
-    void checkDevice(const Project& project,
+    // 检查一个用户设备
+    void checkDevice(const DriverState& state,
                      const Device& device,
                      class PinAllocator& allocator,
                      CheckReport& report) const;
 
-    // 名字唯一性检查
-    void checkNames(const Project& project, CheckReport& report) const;
+    // 检查一个中间设备
+    void checkIntermediate(const DriverState& state,
+                           const IntermediateDevice& device,
+                           class PinAllocator& allocator,
+                           CheckReport& report) const;
+
+    // 名字唯一性
+    void checkNames(const DriverState& state, CheckReport& report) const;
 
     const DriverLibrary& lib_;
     const Chip&          chip_;
