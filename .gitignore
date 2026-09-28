@@ -1,0 +1,11 @@
+build/
+driver/
+.hpm/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+.DS_Store
+compile_commands.json
+.cache/
