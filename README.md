@@ -1,41 +1,14 @@
-# HPM · Hardware Package Manager
+# HPM · 硬件包管理器（Hardware Package Manager）
 
 **声明式嵌入式开发工具链。** 用一份清单描述硬件，自动拉取驱动、解析依赖、生成代码、编译烧录。
-
-```json
-{
-  "mcu": "stm32f103c8t6",
-  "devices": {
-    "door_reader": {
-      "driver": "rc522",
-      "cs": "PA4",
-      "sck": "PA5",
-      "miso": "PA6",
-      "mosi": "PA7"
-    }
-  }
-}
-```
-
-```bash
-hpm init      # 初始化项目
-hpm sync      # 拉驱动、解析依赖、生成 driver/
-hpm build     # 编译固件
-hpm flash     # 烧录
-```
-
-没有 `#include "stm32f1xx_hal.h"`，没有 `HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, ...)`，没有手动配时钟树和引脚复用。
-
-用户只写 `door_reader_read_card()`。
-
 ---
 
 ## 目录
 
 - [设计理念](#设计理念)
+- [快速开始](#快速开始)
 - [核心概念](#核心概念)
 - [安装](#安装)
-- [快速开始](#快速开始)
 - [命令参考](#命令参考)
 - [清单文件](#清单文件)
 - [项目结构](#项目结构)
@@ -59,13 +32,73 @@ hpm flash     # 烧录
 
 HPM 的答案：
 
-1. **声明式**：用户描述「要什么」，工具决定「怎么做」
+1. **声明式**：用户描述「要什么」，工具决定「怎么做」，全自动拉取&配置驱动
 2. **分层解耦**：驱动是模板，硬件是参数，生成期绑定
 3. **能力检查**：所有接口契约在生成期验证，不等到运行时
 4. **资源独占**：引脚是唯一资源，冲突在解析时报错
-5. **可复现**：`driver.json` 锁定版本和 ID，`driver/` 不提交
+5. **可复现**：`driver.json` 锁定版本和 ID
 
-**核心理念**：驱动是模板，硬件是参数，工具是渲染器。
+---
+
+## 快速开始
+
+### 1. 初始化项目
+
+```bash
+mkdir my-project && cd my-project
+hpm init --mcu stm32f103c8t6
+```
+
+生成 `project.json` 和 `.gitignore`。
+
+### 2. 编辑清单
+
+`project.json`：
+
+```json
+{
+  "mcu": "stm32f103c8t6",
+  "devices": {
+    "door_reader": {
+      "driver": "rc522",
+      "cs": "PA4",
+      "rst": "PA3",
+      "sck": "PA5",
+      "miso": "PA6",
+      "mosi": "PA7"
+    }
+  }
+}
+```
+
+引脚都写在应用设备下。工具自动识别 `sck`/`miso`/`mosi` 属于 SPI 总线，创建中间设备。
+### 3. 同步(自动拉取依赖，解析、生成 `driver/`(包括driver.c/.h))
+
+```bash
+hpm sync 
+```
+
+### 4. 写应用
+
+`main.c`：
+
+```c
+#include "driver.h"
+
+int main(void) {
+    hpm_init_all();
+    int card = door_reader_read_card();
+    // ...
+    return 0;
+}
+```
+
+### 5. 编译、烧录
+
+```bash
+hpm build
+hpm flash
+```
 
 ---
 
@@ -149,7 +182,7 @@ int HPM_FN(init)(void) {              // → door_reader_init
 需要 CMake 3.20+、C++20 编译器。
 
 ```bash
-git clone https://github.com/yourname/hpm.git
+git clone https://gitcode.com/xzc842/hpm.git
 cd hpm
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
@@ -172,64 +205,6 @@ brew install --cask gcc-arm-embedded
 ```
 
 自动下载工具链在 Roadmap 中。
-
----
-
-## 快速开始
-
-### 1. 初始化项目
-
-```bash
-mkdir my-project && cd my-project
-hpm init --mcu stm32f103c8t6
-```
-
-生成 `project.json` 和 `.gitignore`。
-
-### 2. 编辑清单
-
-`project.json`：
-
-```json
-{
-  "mcu": "stm32f103c8t6",
-  "devices": {
-    "door_reader": {
-      "driver": "rc522",
-      "cs": "PA4",
-      "rst": "PA3",
-      "sck": "PA5",
-      "miso": "PA6",
-      "mosi": "PA7"
-    }
-  }
-}
-```
-
-引脚都写在应用设备下。工具自动识别 `sck`/`miso`/`mosi` 属于 SPI 总线，创建中间设备。
-
-### 3. 写应用
-
-`main.c`：
-
-```c
-#include "driver.h"
-
-int main(void) {
-    hpm_init_all();
-    int card = door_reader_read_card();
-    // ...
-    return 0;
-}
-```
-
-### 4. 同步、编译、烧录
-
-```bash
-hpm sync
-hpm build
-hpm flash
-```
 
 ---
 
@@ -311,7 +286,7 @@ hpm flash
 
 ---
 
-## 项目结构
+## 用户项目结构
 
 ```
 my-project/
@@ -461,8 +436,6 @@ int HPM_FN(read_card)(void) {
 
 **C 预处理器只匹配独立 token**。`cs` 宏不会匹配 `cs_init` 里的 `cs`。必须用拼接宏 `HPM_CALL(cs, init)`。
 
-**不要用 `printf`**。驱动是硬件抽象层，不该有 IO 副作用。裸机没有 libc。
-
 **不要硬编码引脚名**。用宏（`cs`、`bus`），让工具注入。
 
 ---
@@ -607,19 +580,12 @@ DEF_PIN(PA7)
 ### 开发
 
 ```bash
-git clone https://github.com/yourname/hpm.git
+git clone https://gitcode.com/xzc842/hpm.git
 cd hpm
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
-
-### 代码风格
-
-- C++20
-- 四空格缩进
-- `.clang-format` 已配置
-- 所有函数返回 `Result<T>`，不抛异常
 
 ### 测试
 
@@ -641,6 +607,7 @@ ctest --test-dir build -R "capability"
 - ESP32-C3
 - RP2040
 - CH32V003
+先放本地 `~/.hpm/packages/` 测试，registry 开放后提交。
 
 ### 文档
 
@@ -651,3 +618,33 @@ ctest --test-dir build -R "capability"
 - `chip_driver.md`：如何写芯片驱动
 - `device_driver.md`：如何写设备驱动
 
+## 致谢
+
+本项目的开发离不开以下优秀开源项目和社区的贡献，在此我们表示由衷的感谢。
+
+| 项目 | 用途 | 开源协议 |
+| :--- | :--- | :--- |
+| [nlohmann/json](https://github.com/nlohmann/json.git) | JSON 解析 | MIT |
+| [fmt](https://github.com/fmtlib/fmt.git) | 字符串格式化 | MIT |
+| [CLI11](https://github.com/CLIUtils/CLI11.git) | 命令行解析 | BSD-3-Clause |
+| [Catch2](https://github.com/catchorg/Catch2.git) | 单元测试 | BSL-1.0 |
+| [libcurl](https://github.com/curl/curl.git) | HTTP 客户端（registry 用） | curl（MIT 类） |
+
+## 开源许可
+
+Apache-2.0 [LICENSE](LICENSE)
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request。请参阅[ToDo文档](ToDo.md)
+
+## 联系方式
+---
+
+作者
+
+Xue Zicheng <xuezicheng842@outlook.com>
+
+GitCode: https://gitcode.com/xzc842
+
+---
