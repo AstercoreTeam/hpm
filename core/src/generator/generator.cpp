@@ -198,7 +198,7 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
                      "驱动包未找到: " + pkgDir.string());
     }
 
-    for (const char* sub : {"src", "include"}) {
+    for (const char* sub : {"src", "include", "ld"}) {
         auto dir = pkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -252,7 +252,7 @@ Status Generator::planChipDriver(GenerationPlan& plan) {
     fs::path chipTargetDir = chip_.name;
 
     // 拷贝 src/ 和 include/
-    for (const char* sub : {"src", "include"}) {
+    for (const char* sub : {"src", "include","ld"}) {
         auto dir = chipPkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -280,8 +280,20 @@ void Generator::planMakefile(GenerationPlan& plan) {
     std::ostringstream out;
 
     out << "# 由 HPM 自动生成\n\n";
-    out << "CC ?= arm-none-eabi-gcc\n";
-    out << "OBJCOPY ?= arm-none-eabi-objcopy\n\n";
+
+    // 工具链前缀从芯片驱动推导
+    std::string prefix;
+    {
+        const auto& tn = chip_.toolchain.name;   // 如 "arm-none-eabi-gcc"
+        auto pos = tn.find("gcc");
+        if (pos != std::string::npos && pos > 0) {
+            prefix = tn.substr(0, pos);          // "arm-none-eabi-"
+        }
+    }
+
+    out << "PREFIX ?= " << prefix << "\n";
+    out << "CC := $(PREFIX)gcc\n";
+    out << "OBJCOPY ?= $(PREFIX)objcopy\n\n";
 
     // ── SRCS ──
     std::vector<std::string> srcs;
@@ -289,8 +301,17 @@ void Generator::planMakefile(GenerationPlan& plan) {
     for (const auto& inst : collectInstances()) {
         srcs.push_back(inst.instanceName + "/" + inst.driver + ".c");
     }
+    // 芯片驱动源：<chip>/<chip>.c、<chip>/hpm_pin.c、startup
     srcs.push_back(chip_.name + "/" + chip_.name + ".c");
     srcs.push_back(chip_.name + "/hpm_pin.c");
+    if (!chip_.build.startup.empty()) {
+        // startup 的路径里可能带 src/ 前缀，取出文件名
+        auto s = chip_.build.startup;
+        auto slash = s.find_last_of('/');
+        std::string fname = (slash == std::string::npos) ? s : s.substr(slash + 1);
+        srcs.push_back(chip_.name + "/" + fname);
+    }
+    // 用户 main.c
     srcs.push_back("../main.c");
 
     out << "SRCS := \\\n";
@@ -317,9 +338,22 @@ void Generator::planMakefile(GenerationPlan& plan) {
     }
     out << "\n";
 
-    // ── 编译选项 ──
-    out << "CFLAGS := -std=gnu11 -Wall -Wextra -Wno-implicit-function-declaration -Os $(INCLUDES)\n";
-    out << "LDFLAGS :=\n\n";
+    // ── CFLAGS：芯片 flags + 通用 ──
+    out << "CFLAGS := -std=gnu11 -Wall -Wextra -Wno-implicit-function-declaration -Os";
+    for (const auto& f : chip_.build.flags) {
+        out << " " << f;
+    }
+    out << " $(INCLUDES)\n";
+
+    // ── LDFLAGS：链接脚本 ──
+    out << "LDFLAGS :=";
+    if (!chip_.build.ldscript.empty()) {
+        auto s = chip_.build.ldscript;
+        auto slash = s.find_last_of('/');
+        std::string fname = (slash == std::string::npos) ? s : s.substr(slash + 1);
+        out << " -T " << chip_.name << "/" << fname;
+    }
+    out << " -Wl,--gc-sections\n\n";
 
     out << "BUILD_DIR := ../build\n";
     out << "OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))\n\n";

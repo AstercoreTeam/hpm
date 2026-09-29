@@ -90,6 +90,27 @@ Result<FlashConfig> loadFlash(const json::Value& obj) {
     return fc;
 }
 
+Result<ChipBuildConfig> loadBuild(const json::Value& obj) {
+    FieldReader r(obj, "build");
+    ChipBuildConfig bc;
+
+    bc.cpu = r.optString("cpu");
+    bc.ldscript = r.optString("ldscript");
+    bc.startup = r.optString("startup");
+
+    auto flagsJson = r.optArray("flags");
+    if (!flagsJson) return flagsJson.error();
+    for (const auto& f : *flagsJson) {
+        auto s = f.asString();
+        if (!s) {
+            return Error(ErrorCode::InvalidField,
+                         "build.flags 元素应为字符串");
+        }
+        bc.flags.push_back(*s);
+    }
+    return bc;
+}
+
 } // namespace
 
 Result<Chip> loadChip(const json::Value& json) {
@@ -109,21 +130,27 @@ Result<Chip> loadChip(const json::Value& json) {
     chip.package = r.optString("package");
     chip.qemuMachine = r.optString("qemu_machine");
 
-    // toolchain（必填）
     auto tcJson = r.requireObject("toolchain");
     if (!tcJson) return tcJson.error();
     auto tc = loadToolchain(*tcJson);
     if (!tc) return tc.error();
     chip.toolchain = std::move(*tc);
 
-    // flash（必填）
     auto flashJson = r.requireObject("flash");
     if (!flashJson) return flashJson.error();
     auto fc = loadFlash(*flashJson);
     if (!fc) return fc.error();
     chip.flash = std::move(*fc);
 
-    // pins（必填）
+    // build（可选，默认空）
+    if (json.has("build")) {
+        auto bcJson = r.requireObject("build");
+        if (!bcJson) return bcJson.error();
+        auto bc = loadBuild(*bcJson);
+        if (!bc) return bc.error();
+        chip.build = std::move(*bc);
+    }
+
     auto pinsJson = r.requireObject("pins");
     if (!pinsJson) return pinsJson.error();
     FieldReader pr(*pinsJson, "pins");
