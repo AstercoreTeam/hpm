@@ -19,6 +19,7 @@
 
 #include <hpm/model/flash_config.h>
 #include <hpm/model/pin.h>
+#include <hpm/model/provided_method.h>
 #include <hpm/model/toolchain_spec.h>
 
 #include <string>
@@ -28,16 +29,17 @@ namespace hpm {
 
 // 芯片构建配置
 struct ChipBuildConfig {
-    std::string cpu;                       // "cortex-m3"
-    std::vector<std::string> flags;        // 编译选项
-    std::string ldscript;                  // 链接脚本相对路径
-    std::string startup;                   // 启动文件相对路径
+    std::string cpu;
+    std::vector<std::string> flags;
+    std::string ldscript;
+    std::string startup;
 };
 
 struct Chip {
     std::string name;
     std::string family;
     std::string package;
+    std::string license; 
 
     std::vector<Pin> pins;
     ToolchainSpec    toolchain;
@@ -45,11 +47,21 @@ struct Chip {
     ChipBuildConfig  build;
     std::string      qemuMachine;
 
+    // 芯片驱动提供的方法（如 init）
+    std::vector<ProvidedMethod> provides;
+
     const Pin* findPin(const PinName& pinName) const {
         for (const auto& p : pins) {
             if (p.name == pinName) return &p;
         }
         return nullptr;
+    }
+
+    bool providesMethod(const MethodName& m) const {
+        for (const auto& p : provides) {
+            if (p.name == m) return true;
+        }
+        return false;
     }
 };
 

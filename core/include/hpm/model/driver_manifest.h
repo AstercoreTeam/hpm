@@ -33,6 +33,7 @@ struct DriverManifest {
     DriverName name;                          // "rc522"
     Version version;                          // 1.2.3
     std::string description;
+    std::string license;
 
     std::vector<Requirement>    requirements; // 需求列表
     std::vector<ProvidedMethod> provides;     // 提供的方法

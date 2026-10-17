@@ -35,6 +35,7 @@ add_library(hpm_core STATIC
     src/generator/generator.cpp
     src/util/fs_utils.cpp
     src/util/process.cpp
+    src/generator/hpm_h_generator.cpp
 )
 
 target_include_directories(hpm_core

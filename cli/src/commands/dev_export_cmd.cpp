@@ -18,50 +18,112 @@
 #include "../cmd_context.h"
 #include "../output.h"
 
+#include <hpm/capability/driver_library.h>
+#include <hpm/generator/hpm_h_generator.h>
+#include <hpm/manifest/chip_loader.h>
+#include <hpm/manifest/driver_loader.h>
+#include <hpm/manifest/project_loader.h>
+#include <hpm/manifest/state_loader.h>
 #include <hpm/util/fs_utils.h>
 
 #include <filesystem>
-#include <sstream>
+#include <optional>
 
 namespace hpm::cli {
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// 从包目录加载芯片驱动
+Result<Chip> loadChipFromCache(const fs::path& packagesDir,
+                                const std::string& mcu) {
+    if (!fs::exists(packagesDir)) {
+        return Error(ErrorCode::NotFound,
+                     "包目录不存在: " + packagesDir.string());
+    }
+    for (const auto& entry : fs::directory_iterator(packagesDir)) {
+        if (!entry.is_directory()) continue;
+        auto name = entry.path().filename().string();
+        if (name.rfind(mcu + "-", 0) != 0) continue;
+        auto chipJson = entry.path() / "chip.json";
+        if (fs::exists(chipJson)) {
+            return manifest::loadChipFile(chipJson);
+        }
+    }
+    return Error(ErrorCode::NotFound,
+                 "未找到芯片驱动: " + mcu);
+}
+
+// 从包目录加载所有驱动清单
+DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
+    DriverLibrary lib;
+    if (!fs::exists(packagesDir)) return lib;
+
+    for (const auto& entry : fs::directory_iterator(packagesDir)) {
+        if (!entry.is_directory()) continue;
+        auto mf = entry.path() / "manifest.json";
+        if (!fs::exists(mf)) continue;
+        auto dm = manifest::loadDriverManifestFile(mf);
+        if (dm) {
+            lib.add(std::move(*dm));
+        }
+    }
+    return lib;
+}
+
+} // namespace
 
 void DevExportCmd::setup(CLI::App& app) {
     app.add_flag("--export", export_, "生成 hpm.h");
 }
 
 int DevExportCmd::run(CmdContext& ctx) {
-    namespace fs = std::filesystem;
-
     if (!export_) {
         Output::error("请指定 --export");
         return 1;
     }
 
-    auto driverDir = ctx.driverDir();
-    if (!fs::exists(driverDir)) {
-        Output::error("driver/ 不存在，先运行 hpm sync");
+    // 1. 读 project.json
+    auto proj = manifest::loadProjectFile(ctx.projectFile());
+    if (!proj) {
+        Output::error(proj.error().message());
         return 1;
     }
 
-    // 生成最小 hpm.h：暴露 hpm_init_all + 所有设备的 *_init
-    std::ostringstream out;
-    out << "// 由 HPM 自动生成（hpm dev --export）\n";
-    out << "#pragma once\n\n";
-    out << "#include <stdint.h>\n\n";
-    out << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
-    out << "// 底层逃生舱：初始化所有设备\n";
-    out << "void hpm_init_all(void);\n\n";
-    out << "// 引脚操作（芯片驱动提供）\n";
-    out << "void hpm_pin_write(int pin, int level);\n";
-    out << "int  hpm_pin_read(int pin);\n\n";
-    out << "#ifdef __cplusplus\n}\n#endif\n";
+    // 2. 读 driver.json
+    if (!fs::exists(ctx.driverStateFile())) {
+        Output::error("driver.json 不存在，先运行 hpm sync");
+        return 1;
+    }
+    auto state = manifest::loadDriverStateFile(ctx.driverStateFile());
+    if (!state) {
+        Output::error(state.error().message());
+        return 1;
+    }
 
-    auto path = driverDir / "hpm.h";
-    auto st = util::writeFileAtomic(path, out.str());
+    // 3. 加载芯片驱动
+    auto chip = loadChipFromCache(ctx.packagesDir(), proj->mcu);
+    if (!chip) {
+        Output::error(chip.error().message());
+        return 1;
+    }
+
+    // 4. 加载驱动库
+    auto lib = loadAllDrivers(ctx.packagesDir());
+
+    // 5. 生成 hpm.h
+    HpmHGenerator gen(*state, lib, *chip);
+    auto content = gen.generate();
+
+    // 6. 写入 driver/hpm.h
+    auto path = ctx.driverDir() / "hpm.h";
+    auto st = util::writeFileAtomic(path, content);
     if (!st.ok()) {
         Output::error(st.error().message());
         return 1;
     }
+
     Output::success("已生成 " + path.string());
     return 0;
 }

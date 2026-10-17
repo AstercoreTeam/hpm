@@ -139,6 +139,7 @@ Result<Chip> loadChip(const json::Value& json) {
     chip.family = r.optString("family");
     chip.package = r.optString("package");
     chip.qemuMachine = r.optString("qemu_machine");
+    chip.license = r.optString("license"); 
 
     auto tcJson = r.requireObject("toolchain");
     if (!tcJson) return tcJson.error();
