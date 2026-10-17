@@ -25,6 +25,7 @@
 #include <hpm/manifest/project_loader.h>
 #include <hpm/manifest/state_loader.h>
 #include <hpm/util/fs_utils.h>
+#include "hpm/config.h"
 
 #include <filesystem>
 #include <optional>
@@ -46,7 +47,7 @@ Result<Chip> loadChipFromCache(const fs::path& packagesDir,
         if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
         if (name.rfind(mcu + "-", 0) != 0) continue;
-        auto chipJson = entry.path() / "chip.json";
+        auto chipJson = entry.path() / HPM_FILE_CHIP;
         if (fs::exists(chipJson)) {
             return manifest::loadChipFile(chipJson);
         }
@@ -62,7 +63,7 @@ DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
 
     for (const auto& entry : fs::directory_iterator(packagesDir)) {
         if (!entry.is_directory()) continue;
-        auto mf = entry.path() / "manifest.json";
+        auto mf = entry.path() / HPM_FILE_MANIFEST;
         if (!fs::exists(mf)) continue;
         auto dm = manifest::loadDriverManifestFile(mf);
         if (dm) {
@@ -117,7 +118,7 @@ int DevExportCmd::run(CmdContext& ctx) {
     auto content = gen.generate();
 
     // 6. 写入 driver/hpm.h
-    auto path = ctx.driverDir() / "hpm.h";
+    auto path = ctx.driverDir() / HPM_FILE_HPM_H;
     auto st = util::writeFileAtomic(path, content);
     if (!st.ok()) {
         Output::error(st.error().message());

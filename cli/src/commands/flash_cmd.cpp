@@ -21,7 +21,7 @@
 #include <hpm/manifest/chip_loader.h>
 #include <hpm/manifest/project_loader.h>
 #include <hpm/util/process.h>
-
+#include "hpm/config.h"
 #include <filesystem>
 
 namespace hpm::cli {
@@ -39,7 +39,7 @@ Result<Chip> loadChip(const fs::path& packagesDir, const std::string& mcu) {
         if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
         if (name.rfind(mcu + "-", 0) != 0) continue;
-        auto chipJson = entry.path() / "chip.json";
+        auto chipJson = entry.path() / HPM_FILE_CHIP;
         if (fs::exists(chipJson)) return manifest::loadChipFile(chipJson);
     }
     return Error(ErrorCode::NotFound, "未找到芯片驱动: " + mcu);

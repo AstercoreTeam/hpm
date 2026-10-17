@@ -17,6 +17,7 @@
 
 #include <hpm/manifest/chip_loader.h>
 #include <hpm/manifest/driver_loader.h>
+#include "hpm/config.h"
 
 #include <filesystem>
 #include <iostream>
@@ -54,8 +55,8 @@ int runValidate(DevContext& ctx) {
     }
 
     // 1. manifest.json 或 chip.json
-    auto manifest = dir / "manifest.json";
-    auto chipJson = dir / "chip.json";
+    auto manifest = dir / HPM_FILE_MANIFEST;
+    auto chipJson = dir / HPM_FILE_CHIP;
 
     if (fs::exists(manifest)) {
         auto dm = hpm::manifest::loadDriverManifestFile(manifest);
@@ -81,24 +82,24 @@ int runValidate(DevContext& ctx) {
     }
 
     // 3. src/ 和 include/
-    if (!fs::exists(dir / "src")) {
+    if (!fs::exists(dir / HPM_DIR_SRC)) {
         warn("缺少 src/ 目录");
     }
-    if (!fs::exists(dir / "include")) {
+    if (!fs::exists(dir / HPM_DIR_INCLUDE)) {
         warn("缺少 include/ 目录");
     }
 
     // 4. .c 在 src/，.h 在 include/
-    if (fs::exists(dir / "src") && fs::exists(dir / "include")) {
+    if (fs::exists(dir / HPM_DIR_SRC) && fs::exists(dir / HPM_DIR_INCLUDE)) {
         for (const auto& entry : fs::recursive_directory_iterator(dir)) {
             if (!entry.is_regular_file()) continue;
             auto ext = entry.path().extension();
             auto parent = entry.path().parent_path().filename().string();
 
-            if (ext == ".c" && parent != "src") {
+            if (ext == ".c" && parent != HPM_DIR_SRC) {
                 warn(".c 文件不在 src/: " + entry.path().string());
             }
-            if (ext == ".h" && parent != "include" && parent != "src") {
+            if (ext == ".h" && parent != HPM_DIR_INCLUDE && parent != HPM_DIR_SRC) {
                 warn(".h 文件不在 include/: " + entry.path().string());
             }
         }

@@ -19,6 +19,7 @@
 
 #include <filesystem>
 #include <string>
+#include "hpm/config.h"
 
 namespace hpm::cli {
 
@@ -38,11 +39,11 @@ public:
     void setCacheDir(std::filesystem::path p) { cacheDir_ = std::move(p); }
 
     // 常用路径
-    std::filesystem::path projectFile() const { return projectDir_ / "project.json"; }
-    std::filesystem::path driverStateFile() const { return projectDir_ / "driver.json"; }
-    std::filesystem::path driverDir() const { return projectDir_ / "driver"; }
-    std::filesystem::path buildDir() const { return projectDir_ / "build"; }
-    std::filesystem::path packagesDir() const { return cacheDir_ / "packages"; }
+    std::filesystem::path projectFile() const { return projectDir_ / HPM_FILE_PROJECT; }
+    std::filesystem::path driverStateFile() const { return projectDir_ / HPM_FILE_DRIVER_STATE; }
+    std::filesystem::path driverDir() const { return projectDir_ / HPM_DIR_DRIVER; }
+    std::filesystem::path buildDir() const { return projectDir_ / HPM_DIR_BUILD; }
+    std::filesystem::path packagesDir() const { return cacheDir_ / HPM_PACKAGES_DIR_NAME; }
 
     // 详细输出
     bool verbose() const { return verbose_; }

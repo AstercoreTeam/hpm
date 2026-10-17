@@ -1,0 +1,483 @@
+// Copyright 2026 XueZicheng <xuezicheng842@outlook.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// core/src/registry/registry_client.cpp
+#include <hpm/registry/registry_client.h>
+
+#include <hpm/json/json_io.h>
+#include <hpm/registry/official_key.h>
+#include <hpm/registry/signature.h>
+#include <hpm/util/process.h>
+#include <hpm/util/progress_bar.h>
+
+#include <curl/curl.h>
+
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include "hpm/config.h"
+
+namespace hpm::registry {
+
+namespace {
+
+// ─────────────────────────────────────────────
+// HTTP 回调
+// ─────────────────────────────────────────────
+
+size_t writeToString(void* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* out = static_cast<std::string*>(userdata);
+    out->append(static_cast<char*>(ptr), size * nmemb);
+    return size * nmemb;
+}
+
+size_t writeToFile(void* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* f = static_cast<std::ofstream*>(userdata);
+    f->write(static_cast<char*>(ptr), static_cast<std::streamsize>(size * nmemb));
+    return size * nmemb;
+}
+
+// ─────────────────────────────────────────────
+// 进度回调
+// ─────────────────────────────────────────────
+
+struct ProgressCtx {
+    DownloadProgress progress;
+};
+
+int progressCallback(void* clientp,
+                     curl_off_t dltotal,
+                     curl_off_t dlnow,
+                     curl_off_t /*ultotal*/,
+                     curl_off_t /*ulnow*/) {
+    auto* ctx = static_cast<ProgressCtx*>(clientp);
+    if (!ctx || !ctx->progress) return 0;
+
+    if (dltotal > 0) {
+        ctx->progress(static_cast<uint64_t>(dlnow),
+                      static_cast<uint64_t>(dltotal));
+    } else {
+        ctx->progress(static_cast<uint64_t>(dlnow), 0);
+    }
+    return 0;
+}
+
+} // namespace
+
+// ─────────────────────────────────────────────
+// 配置
+// ─────────────────────────────────────────────
+
+RegistryConfig RegistryConfig::load() {
+    RegistryConfig cfg;
+
+    cfg.registries.push_back(HPM_DEFAULT_REGISTRY_URL);
+
+    if (const char* env = std::getenv(HPM_ENV_REGISTRY ); env && *env) {
+        cfg.registries.clear();
+        std::string s(env);
+        std::istringstream iss(s);
+        std::string token;
+        while (std::getline(iss, token, ',')) {
+            if (!token.empty()) cfg.registries.push_back(token);
+        }
+    }
+
+    if (const char* env = std::getenv(HPM_ENV_HOME); env && *env) {
+        cfg.cacheDir = std::filesystem::path(env);
+    } else if (const char* home = std::getenv("HOME"); home && *home) {
+        cfg.cacheDir = std::filesystem::path(home) / HPM_CACHE_DIR_NAME;
+    } else {
+        cfg.cacheDir = std::filesystem::current_path() / HPM_CACHE_DIR_NAME;
+    }
+
+    auto configFile = cfg.cacheDir / "config.json";
+    if (std::filesystem::exists(configFile)) {
+        auto j = json::parseFile(configFile);
+        if (j) {
+            auto regs = j->get("registries");
+            if (regs && regs->isArray()) {
+                cfg.registries.clear();
+                auto n = regs->size();
+                if (n) {
+                    for (size_t i = 0; i < *n; ++i) {
+                        auto item = regs->at(i);
+                        if (item) {
+                            auto s = item->asString();
+                            if (s) cfg.registries.push_back(*s);
+                        }
+                    }
+                }
+            }
+            cfg.offline = j->getBool("offline", false);
+        }
+    }
+
+    if (const char* env = std::getenv(HPM_ENV_SKIP_SIGNATURE); env && *env) {
+        cfg.skipSignature = (std::string(env) == "1");
+    }
+
+    return cfg;
+}
+
+// ─────────────────────────────────────────────
+// 构造 / 析构
+// ─────────────────────────────────────────────
+
+RegistryClient::RegistryClient(const RegistryConfig& config)
+    : config_(config) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+RegistryClient::~RegistryClient() {
+    curl_global_cleanup();
+}
+
+std::filesystem::path RegistryClient::packagesDir() const {
+    return config_.cacheDir / HPM_PACKAGES_DIR_NAME;
+}
+
+std::filesystem::path RegistryClient::tarballsDir() const {
+    return config_.cacheDir / HPM_TARBALLS_DIR_NAME;
+}
+
+// ─────────────────────────────────────────────
+// HTTP
+// ─────────────────────────────────────────────
+
+Result<std::string> RegistryClient::httpGet(const std::string& url,
+                                              DownloadProgress progress) {
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return Error(ErrorCode::NetworkError, "curl_easy_init 失败");
+    }
+
+    bool isFile = (url.rfind("file://", 0) == 0);
+
+    std::string out;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeToString);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, HPM_HTTP_TIMEOUT);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, HPM_USER_AGENT);
+
+    // 进度回调
+    ProgressCtx ctx{progress};
+    if (progress) {
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return Error(ErrorCode::NetworkError,
+                     "HTTP 失败: " + std::string(curl_easy_strerror(res)));
+    }
+    if (!isFile && httpCode != 200) {
+        return Error(ErrorCode::NetworkError,
+                     "HTTP " + std::to_string(httpCode) + ": " + url);
+    }
+    return out;
+}
+
+Result<void> RegistryClient::httpDownload(
+    const std::string& url,
+    const std::filesystem::path& dest,
+    DownloadProgress progress) {
+
+    std::error_code ec;
+    std::filesystem::create_directories(dest.parent_path(), ec);
+
+    std::ofstream f(dest, std::ios::binary);
+    if (!f) {
+        return Error(ErrorCode::IoError, "无法写入: " + dest.string());
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return Error(ErrorCode::NetworkError, "curl_easy_init 失败");
+    }
+
+    bool isFile = (url.rfind("file://", 0) == 0);
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeToFile);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &f);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, HPM_HTTP_DOWNLOAD_TIMEOUT);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, HPM_USER_AGENT);
+
+    // 进度回调
+    ProgressCtx ctx{progress};
+    if (progress) {
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
+    f.close();
+
+    if (res != CURLE_OK) {
+        std::filesystem::remove(dest);
+        return Error(ErrorCode::NetworkError,
+                     "下载失败: " + std::string(curl_easy_strerror(res)));
+    }
+    if (!isFile && httpCode != 200) {
+        std::filesystem::remove(dest);
+        return Error(ErrorCode::NetworkError,
+                     "HTTP " + std::to_string(httpCode) + ": " + url);
+    }
+    return {};
+}
+
+// ─────────────────────────────────────────────
+// 索引
+// ─────────────────────────────────────────────
+
+Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
+    if (indexLoaded_) return cachedIndex_;
+
+    if (!config_.skipSignature) {
+        OfficialKeyManager keyMgr(config_.cacheDir);
+        auto key = keyMgr.ensure();
+        if (!key) {
+            return Error(ErrorCode::PermissionDenied,
+                         "官方公钥获取失败: " + key.error().message());
+        }
+        officialPubKey_ = *key;
+    }
+
+    std::string lastError;
+
+    for (const auto& url : config_.registries) {
+        auto text = httpGet(url, progress);
+        if (!text) {
+            lastError = text.error().message();
+            continue;
+        }
+
+        if (!config_.skipSignature) {
+            auto sigUrl = url + ".sig";
+            auto sigText = httpGet(sigUrl);
+            if (!sigText) {
+                lastError = "索引签名下载失败: " + sigText.error().message();
+                continue;
+            }
+
+            auto tmpDir = config_.cacheDir / HPM_TMP_DIR_NAME;
+            std::filesystem::create_directories(tmpDir);
+            auto tmpIndex = tmpDir / HPM_FILE_INDEX;
+            auto tmpSig = tmpDir / HPM_FILE_INDEX_SIG;
+
+            {
+                std::ofstream f(tmpIndex);
+                f << *text;
+            }
+            {
+                std::ofstream f(tmpSig);
+                f << *sigText;
+            }
+
+            auto ok = verifySignature(officialPubKey_, tmpSig, tmpIndex);
+            if (!ok) {
+                lastError = "索引签名验证失败: " + ok.error().message();
+                continue;
+            }
+            if (!*ok) {
+                lastError = "索引签名无效（可能被篡改）";
+                continue;
+            }
+        }
+
+        auto idx = parseIndex(*text);
+        if (!idx) {
+            lastError = idx.error().message();
+            continue;
+        }
+
+        cachedIndex_ = *idx;
+        indexLoaded_ = true;
+        return cachedIndex_;
+    }
+
+    return Error(ErrorCode::NetworkError,
+                 "所有镜像失败。最后错误: " + lastError);
+}
+
+// ─────────────────────────────────────────────
+// 包
+// ─────────────────────────────────────────────
+
+Result<std::filesystem::path> RegistryClient::ensurePackage(
+    const std::string& name,
+    const std::string& version,
+    DownloadProgress progress) {
+
+    auto pkgDir = packagesDir() / (name + "-" + version);
+
+    if (std::filesystem::exists(pkgDir)) {
+        return pkgDir;
+    }
+
+    if (config_.offline) {
+        return Error(ErrorCode::NetworkError,
+                     "离线模式，包未缓存: " + name + "@" + version);
+    }
+
+    auto idx = fetchIndex();
+    if (!idx) return idx.error();
+
+    auto* info = idx->find(name, version);
+    if (!info) {
+        return Error(ErrorCode::NotFound,
+                     "索引里找不到包: " + name + "@" + version);
+    }
+
+    auto tarball = tarballsDir() / (name + "-" + version + ".tar.gz");
+    if (!std::filesystem::exists(tarball)) {
+        auto dl = httpDownload(info->url, tarball, progress);
+        if (!dl) return dl.error();
+    }
+
+    if (!config_.skipSignature) {
+        auto sigSt = verifyPackageSignature(tarball, info->sigUrl, info->developer);
+        if (!sigSt.ok()) {
+            std::filesystem::remove(tarball);
+            return sigSt.error();
+        }
+    }
+
+    if (!info->sha256.empty()) {
+        auto actual = sha256File(tarball);
+        if (actual != info->sha256) {
+            std::filesystem::remove(tarball);
+            return Error(ErrorCode::ChecksumMismatch,
+                         "SHA256 不匹配: " + name + "@" + version);
+        }
+    }
+
+    auto ex = extractTarball(tarball, packagesDir());
+    if (!ex.ok()) return ex.error();
+
+    return pkgDir;
+}
+
+// ─────────────────────────────────────────────
+// 开发者公钥
+// ─────────────────────────────────────────────
+
+Result<std::filesystem::path> RegistryClient::fetchAndVerifyDeveloperKey(
+    const std::string& devName) {
+
+    auto it = developerKeys_.find(devName);
+    if (it != developerKeys_.end()) return it->second;
+
+    auto idx = fetchIndex();
+    if (!idx) return idx.error();
+
+    auto dit = idx->developers.find(devName);
+    if (dit == idx->developers.end()) {
+        return Error(ErrorCode::NotFound,
+                     "索引里找不到开发者: " + devName);
+    }
+
+    const auto& info = dit->second;
+
+    auto keyDir = config_.cacheDir / HPM_KEYS_DIR_NAME / devName;
+    std::filesystem::create_directories(keyDir);
+
+    auto pubPath = keyDir / (devName + ".pub");
+    auto sigPath = keyDir / (devName + ".pub.sig");
+
+    if (!std::filesystem::exists(pubPath)) {
+        auto dl = httpDownload(info.pub, pubPath, nullptr);
+        if (!dl) return dl.error();
+    }
+    if (!std::filesystem::exists(sigPath)) {
+        auto dl = httpDownload(info.pubSig, sigPath, nullptr);
+        if (!dl) return dl.error();
+    }
+
+    auto ok = verifySignature(officialPubKey_, sigPath, pubPath);
+    if (!ok) return ok.error();
+    if (!*ok) {
+        return Error(ErrorCode::ChecksumMismatch,
+                     "开发者公钥签名无效: " + devName);
+    }
+
+    developerKeys_[devName] = pubPath;
+    return pubPath;
+}
+
+Status RegistryClient::verifyPackageSignature(
+    const std::filesystem::path& tarball,
+    const std::string& sigUrl,
+    const std::string& devName) {
+
+    if (sigUrl.empty()) {
+        return Error(ErrorCode::InvalidField,
+                     "包没有签名 URL: " + tarball.string());
+    }
+
+    auto sigPath = tarball;
+    sigPath += ".sig";
+    if (!std::filesystem::exists(sigPath)) {
+        auto dl = httpDownload(sigUrl, sigPath, nullptr);
+        if (!dl) return dl.error();
+    }
+
+    auto pub = fetchAndVerifyDeveloperKey(devName);
+    if (!pub) return pub.error();
+
+    auto ok = verifySignature(*pub, sigPath, tarball);
+    if (!ok) return ok.error();
+    if (!*ok) {
+        return Error(ErrorCode::ChecksumMismatch,
+                     "包签名无效: " + tarball.string());
+    }
+    return {};
+}
+
+// ─────────────────────────────────────────────
+// 解压
+// ─────────────────────────────────────────────
+
+Status RegistryClient::extractTarball(
+    const std::filesystem::path& tarball,
+    const std::filesystem::path& destDir) {
+
+    std::error_code ec;
+    std::filesystem::create_directories(destDir, ec);
+
+    auto st = util::runProcess("tar",
+        {"-xzf", tarball.string(), "-C", destDir.string()}, false);
+    if (!st.ok()) {
+        return Error(ErrorCode::IoError,
+                     "解压失败: " + tarball.string() + " - " + st.error().message());
+    }
+    return {};
+}
+
+} // namespace hpm::registry

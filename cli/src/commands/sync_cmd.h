@@ -31,6 +31,8 @@ public:
 
 private:
     bool dryRun_ = false;
+    bool offline_ = false;
+    bool skipSignature_ = false;
 };
 
 } // namespace hpm::cli

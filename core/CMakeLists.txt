@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# core/CMakeLists.txt
-
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
 add_library(hpm_core STATIC
     src/version.cpp
     src/model/version.cpp
@@ -36,6 +36,10 @@ add_library(hpm_core STATIC
     src/util/fs_utils.cpp
     src/util/process.cpp
     src/generator/hpm_h_generator.cpp
+    src/registry/index.cpp
+    src/registry/registry_client.cpp
+    src/registry/signature.cpp
+    src/registry/official_key.cpp
 )
 
 target_include_directories(hpm_core
@@ -49,4 +53,8 @@ target_link_libraries(hpm_core
     PUBLIC
         nlohmann_json::nlohmann_json
         fmt::fmt
+    PRIVATE
+        CURL::libcurl
+        OpenSSL::SSL
+        OpenSSL::Crypto
 )

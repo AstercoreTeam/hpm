@@ -14,14 +14,14 @@
 
 // cli/src/cmd_context.cpp
 #include "cmd_context.h"
-
+#include "hpm/config.h"
 #include <cstdlib>
 
 namespace hpm::cli {
 
 std::filesystem::path CmdContext::defaultCacheDir() {
     // 优先 $HPM_HOME
-    if (const char* env = std::getenv("HPM_HOME"); env && *env) {
+    if (const char* env = std::getenv(HPM_ENV_HOME); env && *env) {
         return std::filesystem::path(env);
     }
     // 再试 $HOME/.hpm

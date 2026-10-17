@@ -26,10 +26,16 @@
 #include <hpm/manifest/driver_loader.h>
 #include <hpm/manifest/project_loader.h>
 #include <hpm/manifest/state_loader.h>
+#include <hpm/registry/registry_client.h>
 #include <hpm/resolver/resolver.h>
+#include <hpm/util/progress_bar.h>
+#include "hpm/config.h"
 
 #include <filesystem>
+#include <iostream>
 #include <optional>
+#include <queue>
+#include <set>
 
 namespace hpm::cli {
 
@@ -37,7 +43,6 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// 从本地包目录加载芯片驱动
 Result<Chip> loadChipFromCache(const fs::path& packagesDir,
                                 const std::string& mcu) {
     if (!fs::exists(packagesDir)) {
@@ -48,8 +53,7 @@ Result<Chip> loadChipFromCache(const fs::path& packagesDir,
         if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
         if (name.rfind(mcu + "-", 0) != 0) continue;
-
-        auto chipJson = entry.path() / "chip.json";
+        auto chipJson = entry.path() / HPM_FILE_CHIP;
         if (fs::exists(chipJson)) {
             return manifest::loadChipFile(chipJson);
         }
@@ -58,16 +62,14 @@ Result<Chip> loadChipFromCache(const fs::path& packagesDir,
                  "未找到芯片驱动: " + mcu + "（在 " + packagesDir.string() + " 下）");
 }
 
-// 扫 packages 目录里所有 manifest.json，全部加载
 DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
     DriverLibrary lib;
     if (!fs::exists(packagesDir)) return lib;
 
     for (const auto& entry : fs::directory_iterator(packagesDir)) {
         if (!entry.is_directory()) continue;
-        auto mf = entry.path() / "manifest.json";
+        auto mf = entry.path() / HPM_FILE_MANIFEST;
         if (!fs::exists(mf)) continue;
-
         auto dm = manifest::loadDriverManifestFile(mf);
         if (dm.ok()) {
             lib.add(std::move(*dm));
@@ -76,15 +78,79 @@ DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
     return lib;
 }
 
+struct NeededPackage {
+    std::string name;
+    std::string version;
+};
+
+Result<std::vector<NeededPackage>> expandDependencies(
+    const registry::Index& idx,
+    const std::string& mcu,
+    const Project& proj) {
+
+    std::vector<NeededPackage> needed;
+    std::set<std::string> visited;
+    std::queue<std::string> queue;
+
+    queue.push(mcu);
+
+    for (const auto& dev : proj.devices) {
+        if (dev.version.toString() != "0.0.0") {
+            queue.push(dev.driver + "@" + dev.version.toString());
+        } else {
+            queue.push(dev.driver);
+        }
+    }
+
+    while (!queue.empty()) {
+        auto item = queue.front();
+        queue.pop();
+
+        if (visited.count(item)) continue;
+        visited.insert(item);
+
+        std::string name = item;
+        std::string ver;
+        auto at = item.find('@');
+        if (at != std::string::npos) {
+            name = item.substr(0, at);
+            ver = item.substr(at + 1);
+        }
+        if (ver.empty()) {
+            ver = idx.findLatestVersion(name);
+        }
+        if (ver.empty()) {
+            return Error(ErrorCode::NotFound,
+                         "索引里找不到包: " + name);
+        }
+
+        auto* pv = idx.find(name, ver);
+        if (!pv) {
+            return Error(ErrorCode::NotFound,
+                         "索引里找不到包: " + name + "@" + ver);
+        }
+
+        needed.push_back({name, ver});
+
+        for (const auto& [key, type] : pv->requirements) {
+            if (idx.packages.count(type)) {
+                queue.push(type);
+            }
+        }
+    }
+
+    return needed;
+}
+
 } // namespace
 
 void SyncCmd::setup(CLI::App& app) {
     app.add_flag("--dry-run", dryRun_, "只解析，不写文件");
+    app.add_flag("--offline", offline_, "离线模式，只用本地缓存");
+    app.add_flag("--skip-signature", skipSignature_, "跳过签名验证（仅开发）");
 }
 
 int SyncCmd::run(CmdContext& ctx) {
-    namespace fs = std::filesystem;
-
     // 1. 读 project.json
     Output::step("读取 project.json");
     auto proj = manifest::loadProjectFile(ctx.projectFile());
@@ -95,7 +161,7 @@ int SyncCmd::run(CmdContext& ctx) {
     Output::detail("MCU: " + proj->mcu);
     Output::detail("设备数: " + std::to_string(proj->devices.size()));
 
-    // 2. 读已有的 driver.json（可空）
+    // 2. 读已有 driver.json
     std::optional<DriverState> existing;
     if (fs::exists(ctx.driverStateFile())) {
         auto st = manifest::loadDriverStateFile(ctx.driverStateFile());
@@ -105,7 +171,59 @@ int SyncCmd::run(CmdContext& ctx) {
         }
     }
 
-    // 3. 加载芯片驱动
+    // 3. 确保依赖包在本地
+    Output::step("确保依赖包在本地");
+
+    registry::RegistryConfig cfg = registry::RegistryConfig::load();
+    if (offline_) cfg.offline = true;
+    if (skipSignature_) cfg.skipSignature = true;
+    cfg.cacheDir = ctx.cacheDir();
+
+    registry::RegistryClient client(cfg);
+
+    // 3a. 拉索引
+    std::optional<registry::Index> idx;
+
+    {
+        auto idxBar = util::ProgressBar(HPM_FILE_INDEX, 0);
+        auto idxResult = client.fetchIndex([&](uint64_t downloaded, uint64_t total) {
+            idxBar.update(downloaded, total);
+        });
+        if (!idxResult) {
+            idxBar.fail();
+            Output::error(idxResult.error().message());
+            return 1;
+        }
+        idxBar.done();
+        idx = std::move(*idxResult);
+        Output::detail("索引已加载（" + std::to_string(idx->packages.size()) + " 个包）");
+    }
+
+    // 3b. 展开依赖
+    auto needed = expandDependencies(*idx, proj->mcu, *proj);
+    if (!needed) {
+        Output::error(needed.error().message());
+        return 1;
+    }
+    Output::detail("需要 " + std::to_string(needed->size()) + " 个包");
+
+    // 3c. 下载
+    for (const auto& pkg : *needed) {
+        auto bar = util::ProgressBar(pkg.name + "@" + pkg.version, 0);
+        auto pkgPath = client.ensurePackage(pkg.name, pkg.version,
+            [&](uint64_t downloaded, uint64_t total) {
+                bar.update(downloaded, total);
+            });
+        if (!pkgPath) {
+            bar.fail();
+            Output::error(pkgPath.error().message());
+            return 1;
+        }
+        bar.done();
+    }
+    Output::success("所有依赖包已就绪");
+
+    // 4. 加载芯片驱动
     Output::step("加载芯片驱动: " + proj->mcu);
     auto chip = loadChipFromCache(ctx.packagesDir(), proj->mcu);
     if (!chip) {
@@ -113,12 +231,12 @@ int SyncCmd::run(CmdContext& ctx) {
         return 1;
     }
 
-    // 4. 加载驱动库
+    // 5. 加载驱动库
     Output::step("加载驱动库");
     auto lib = loadAllDrivers(ctx.packagesDir());
     Output::detail("已加载 " + std::to_string(lib.size()) + " 个驱动");
 
-    // 5. 依赖解析
+    // 6. 依赖解析
     Output::step("解析依赖");
     Resolver resolver(lib, *proj, existing ? &*existing : nullptr);
     auto state = resolver.resolve();
@@ -129,7 +247,7 @@ int SyncCmd::run(CmdContext& ctx) {
     Output::detail("用户设备: " + std::to_string(state->userDevices.size()));
     Output::detail("中间设备: " + std::to_string(state->intermediateDevices.size()));
 
-    // 6. 能力检查（在展开后的状态上检查）
+    // 7. 能力检查
     Output::step("能力检查");
     CapabilityChecker checker(lib, *chip);
     auto report = checker.check(*state);
@@ -147,7 +265,7 @@ int SyncCmd::run(CmdContext& ctx) {
         return 0;
     }
 
-    // 7. 写 driver.json
+    // 8. 写 driver.json
     Output::step("写入 driver.json");
     auto stateJson = manifest::saveDriverState(*state);
     auto st = json::writeFile(stateJson, ctx.driverStateFile());
@@ -157,7 +275,7 @@ int SyncCmd::run(CmdContext& ctx) {
     }
     Output::success("driver.json 已更新");
 
-    // 8. 生成 driver/
+    // 9. 生成 driver/
     Output::step("生成 driver/");
     Generator gen(*state, lib, *proj, *chip, ctx.packagesDir(), ctx.driverDir());
     auto genSt = gen.generate();

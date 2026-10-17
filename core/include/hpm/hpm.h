@@ -18,6 +18,7 @@
 #pragma once
 
 // 公共 API 总入口
+#include "hpm/config.h"
 #include "hpm/result.h"
 #include "hpm/types.h"
 

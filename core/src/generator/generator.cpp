@@ -16,6 +16,7 @@
 #include <hpm/generator/generator.h>
 
 #include <hpm/util/fs_utils.h>
+#include "hpm/config.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -108,7 +109,7 @@ fs::path Generator::findChipPackageDir() const {
         if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
         if (name.rfind(chip_.name + "-", 0) != 0) continue;
-        if (fs::exists(entry.path() / "chip.json")) return entry.path();
+        if (fs::exists(entry.path() / HPM_FILE_CHIP)) return entry.path();
     }
     return {};
 }
@@ -150,7 +151,7 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
 
     out << "#ifdef __cplusplus\n}\n#endif\n";
 
-    plan.addFile("driver.h", out.str());
+    plan.addFile(HPM_FILE_DRIVER_H, out.str());
 }
 
 // ─────────────────────────────────────────────
@@ -160,14 +161,14 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
 void Generator::planDriverSource(GenerationPlan& plan) {
     std::ostringstream out;
     out << "// 由 HPM 自动生成，请勿手动修改\n";
-    out << "#include \"driver.h\"\n\n";
+    out << "#include \""<<HPM_FILE_DRIVER_H<<"\"\n\n";
     out << "void hpm_init_all(void) {\n";
     for (const auto& dev : state_.userDevices) {
         out << "    " << dev.name << "_init();\n";
     }
     out << "}\n";
 
-    plan.addFile("driver.c", out.str());
+    plan.addFile(HPM_FILE_DRIVER_C, out.str());
 }
 
 // ─────────────────────────────────────────────
@@ -190,7 +191,7 @@ Status Generator::planInstance(GenerationPlan& plan,
         for (const auto& [k, v] : bindings) {
             out << "#define " << k << "  " << macroValue(v) << "\n";
         }
-        plan.addFile(instDir / "hpm_dev.h", out.str());
+        plan.addFile(instDir / HPM_FILE_HPM_DEV_H, out.str());
     }
 
     // 拷贝驱动源码
@@ -214,7 +215,7 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
                      "驱动包未找到: " + pkgDir.string());
     }
 
-    for (const char* sub : {"src", "include", "ld"}) {
+    for (const char* sub : {HPM_DIR_SRC, HPM_DIR_INCLUDE,HPM_DIR_LD}) {
         auto dir = pkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -248,7 +249,7 @@ Status Generator::planChipDriver(GenerationPlan& plan) {
 
     fs::path chipTargetDir = chip_.name;
 
-    for (const char* sub : {"src", "include", "ld"}) {
+    for (const char* sub : {HPM_DIR_SRC, HPM_DIR_INCLUDE,HPM_DIR_LD}) {
         auto dir = chipPkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -286,13 +287,13 @@ void Generator::planMakefile(GenerationPlan& plan) {
     // 3. 芯片驱动包 src/ 下的所有 .c
     // 4. 用户 main.c
     std::vector<std::string> srcs;
-    srcs.push_back("driver.c");
+    srcs.push_back(HPM_FILE_DRIVER_C);
 
     // 实例源文件：按包里的 src/ 内容决定，但写到实例目录下
     for (const auto& inst : collectInstances()) {
         auto pkgSrcDir = packageCacheDir_ /
                          (inst.driver + "-" + inst.version.toString()) /
-                         "src";
+                         HPM_DIR_SRC;
         if (!fs::exists(pkgSrcDir)) continue;
 
         std::set<std::string> seen;
@@ -312,7 +313,7 @@ void Generator::planMakefile(GenerationPlan& plan) {
     {
         auto chipPkgDir = findChipPackageDir();
         if (!chipPkgDir.empty()) {
-            auto srcDir = chipPkgDir / "src";
+            auto srcDir = chipPkgDir / HPM_DIR_SRC;
             if (fs::exists(srcDir)) {
                 for (const auto& entry : fs::recursive_directory_iterator(srcDir)) {
                     if (!entry.is_regular_file()) continue;

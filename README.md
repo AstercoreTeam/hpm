@@ -592,16 +592,17 @@ DEF_PIN(P3, 4)
 - [x] CH552G USB CDC 真机验证
 - [x] Makefile 源文件扫描（支持一个驱动多个 `.c`）
 - [x] `hpm.h` 完整实现
+- [x] **registry**：从 GitHub 拉驱动包和索引
+- [x] **签名校验**：包完整性
+- [x] **多镜像支持**：项目 / 用户 / 全局优先级
+- [x] **hpm-dev**：驱动开发工具（validate）
+- [x] **许可证处理**：驱动包带 license
 
 ### 进行中
 
-- [ ] **registry**：从 GitHub 拉驱动包和索引
-- [ ] **签名校验**：包完整性
-- [ ] **多镜像支持**：项目 / 用户 / 全局优先级
 - [ ] **toolchain 管理**：自动下载工具链
-- [ ] **hpm-dev**：驱动开发工具（init / test / validate / publish）
+- [ ] **hpm-dev**：驱动开发工具（init / test / publish）
 - [ ] **QEMU 测试**：`hpm-dev test` 支持多芯片模拟
-- [ ] **许可证处理**：驱动包带 license
 
 ### 计划中
 
