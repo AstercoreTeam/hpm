@@ -69,10 +69,16 @@ TEST_CASE("Requirement lookup", "[model]") {
 TEST_CASE("Provided method lookup", "[model]") {
     DriverManifest spi;
     spi.name = "spi";
-    spi.provides = {
-        {"transfer", "int(uint8_t*, uint8_t*, size_t)"},
-        {"set_speed", "void(uint32_t)"},
-    };
+
+    ProvidedMethod m1;
+    m1.name = "transfer";
+    m1.returnType = "int";
+
+    ProvidedMethod m2;
+    m2.name = "set_speed";
+    m2.returnType = "void";
+
+    spi.provides = {m1, m2};
 
     REQUIRE(spi.providesMethod("transfer"));
     REQUIRE(spi.providesMethod("set_speed"));

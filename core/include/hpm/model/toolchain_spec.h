@@ -24,11 +24,48 @@
 namespace hpm {
 
 // 工具链描述
-// 例：{ name: "arm-none-eabi-gcc", version: "12.2.0", url: "..." }
+// 芯片驱动可以显式声明 cc / objcopy / size / prefix
+// 如果只给 name（如 "arm-none-eabi-gcc"），工具会推导 prefix（旧行为，保留兼容）
 struct ToolchainSpec {
-    std::string        name;        // "arm-none-eabi-gcc"
-    VersionRange       version;     // "12.2.0" 或 "^12.0.0"
-    std::string        url;         // 可选：下载地址模板
+    std::string  name;       // "arm-none-eabi-gcc"（兼容字段）
+    std::string  prefix;     // "arm-none-eabi-"（显式前缀，优先）
+    std::string  cc;         // "arm-none-eabi-gcc"（显式命令，最优先）
+    std::string  objcopy;    // "arm-none-eabi-objcopy"
+    std::string  size;       // "arm-none-eabi-size"
+    VersionRange version;
+    std::string  url;
+
+    // 解析出实际使用的命令名
+    std::string resolveCc() const {
+        if (!cc.empty()) return cc;
+        if (!prefix.empty()) return prefix + "gcc";
+        return name.empty() ? "gcc" : name;
+    }
+
+    std::string resolveObjcopy() const {
+        if (!objcopy.empty()) return objcopy;
+        if (!prefix.empty()) return prefix + "objcopy";
+        // 从 name 推导
+        if (!name.empty()) {
+            auto pos = name.find("gcc");
+            if (pos != std::string::npos && pos > 0) {
+                return name.substr(0, pos) + "objcopy";
+            }
+        }
+        return "objcopy";
+    }
+
+    std::string resolveSize() const {
+        if (!size.empty()) return size;
+        if (!prefix.empty()) return prefix + "size";
+        if (!name.empty()) {
+            auto pos = name.find("gcc");
+            if (pos != std::string::npos && pos > 0) {
+                return name.substr(0, pos) + "size";
+            }
+        }
+        return "size";
+    }
 };
 
 } // namespace hpm

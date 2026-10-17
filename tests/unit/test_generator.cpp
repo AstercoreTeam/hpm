@@ -220,26 +220,72 @@ TEST_CASE("generator creates per-instance dirs", "[generator]") {
     fs::remove_all(tmp);
 }
 
-TEST_CASE("generator driver.h has user API", "[generator]") {
-    auto lib   = makeLib();
-    auto state = makeState();
-    auto proj  = makeProject();
-    auto chip  = makeChip();
+TEST_CASE("generator driver.h has correct signatures", "[generator]") {
+    DriverLibrary lib;
+    {
+        const char* text = R"({
+            "name": "testdrv",
+            "version": "1.0.0",
+            "provides": {
+                "methods": [
+                    { "name": "init", "return": "int", "params": [] },
+                    {
+                        "name": "send",
+                        "return": "int",
+                        "params": [
+                            { "type": "const unsigned char*", "name": "buf" },
+                            { "type": "size_t", "name": "len" }
+                        ]
+                    }
+                ]
+            }
+        })";
+        lib.add(*loadDriverManifest(*json::parse(text)));
+    }
 
-    auto tmp = fs::temp_directory_path() / "hpm_gen_api_test";
+    DriverState state;
+    Device d;
+    d.name = "my_dev";
+    d.driver = "testdrv";
+    d.version = *Version::parse("1.0.0");
+    state.userDevices.push_back(d);
+
+    Project proj;
+    Chip chip;
+    chip.name = "testchip";
+
+    auto tmp = fs::temp_directory_path() / "hpm_gen_sig_test";
     fs::remove_all(tmp);
-    setupFakePackages(tmp / "packages");
+    {
+        auto pkg = tmp / "packages" / "testdrv-1.0.0";
+        fs::create_directories(pkg / "src");
+        std::ofstream(pkg / "src" / "testdrv.c") << "// t\n";
+        fs::create_directories(tmp / "packages" / "testchip-1.0.0" / "src");
+        std::ofstream(tmp / "packages" / "testchip-1.0.0" / "chip.json") << R"({
+            "name": "testchip",
+            "toolchain": { "prefix": "arm-none-eabi-" },
+            "flash": { "tool": "echo" },
+            "pins": {}
+        })";
+        std::ofstream(tmp / "packages" / "testchip-1.0.0" / "src" / "testchip.c") << "// c\n";
+    }
 
     Generator gen(state, lib, proj, chip, tmp / "packages", tmp / "driver");
     auto plan = gen.plan();
+    if (!plan.ok()) {
+        WARN("plan error: " << plan.error().message());
+    }
     REQUIRE(plan.ok());
 
+    bool found = false;
     for (const auto& f : plan->files) {
         if (f.relativePath == "driver.h") {
-            REQUIRE(f.content.find("door_reader_init") != std::string::npos);
-            REQUIRE(f.content.find("door_reader_read_card") != std::string::npos);
+            found = true;
+            REQUIRE(f.content.find("int my_dev_send(const unsigned char* buf, size_t len);") != std::string::npos);
+            REQUIRE(f.content.find("int my_dev_init(void);") != std::string::npos);
         }
     }
+    REQUIRE(found);
 
     fs::remove_all(tmp);
 }

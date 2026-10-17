@@ -52,6 +52,7 @@ private:
     void planDriverHeader(GenerationPlan& plan);
     void planDriverSource(GenerationPlan& plan);
     void planMakefile(GenerationPlan& plan);
+    std::filesystem::path findChipPackageDir() const;
 
     Status planInstance(GenerationPlan& plan,
                         const std::string& instanceName,

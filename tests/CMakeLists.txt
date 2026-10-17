@@ -22,6 +22,7 @@ add_executable(hpm_tests
     unit/test_capability.cpp
     unit/test_resolver.cpp
     unit/test_generator.cpp
+    unit/test_toolchain.cpp
 )
 
 target_link_libraries(hpm_tests

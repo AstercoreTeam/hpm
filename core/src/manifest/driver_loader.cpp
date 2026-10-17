@@ -1,17 +1,3 @@
-// Copyright 2026 XueZicheng <xuezicheng842@outlook.com>
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // core/src/manifest/driver_loader.cpp
 #include <hpm/manifest/driver_loader.h>
 
@@ -35,7 +21,6 @@ Result<Requirement> loadRequirement(const std::string& key,
 
     req.optional = r.optBool("optional", false);
 
-    // methods 可选，可以是字符串数组
     auto methods = r.optArray("methods");
     if (!methods) return methods.error();
     for (const auto& m : *methods) {
@@ -52,6 +37,7 @@ Result<Requirement> loadRequirement(const std::string& key,
 
 Result<ProvidedMethod> loadProvidedMethod(const json::Value& v,
                                           const std::string& ctx) {
+    // 旧格式：字符串
     if (v.isString()) {
         auto s = v.asString();
         if (!s) return s.error();
@@ -59,17 +45,34 @@ Result<ProvidedMethod> loadProvidedMethod(const json::Value& v,
         m.name = *s;
         return m;
     }
+    // 新格式：对象
     if (v.isObject()) {
         FieldReader r(v, ctx);
         ProvidedMethod m;
         auto name = r.requireString("name");
         if (!name) return name.error();
         m.name = *name;
-        m.signature = r.optString("signature");
+        m.returnType = r.optString("return", "int");
+
+        auto paramsJson = r.optArray("params");
+        if (!paramsJson) return paramsJson.error();
+        for (size_t i = 0; i < paramsJson->size(); ++i) {
+            auto p = (*paramsJson)[i];
+            if (!p.isObject()) {
+                return Error(ErrorCode::InvalidField,
+                             ctx + ".params[" + std::to_string(i) + "] 必须是对象");
+            }
+            FieldReader pr(p, ctx + ".params[" + std::to_string(i) + "]");
+            MethodParam mp;
+            auto type = pr.requireString("type");
+            if (!type) return type.error();
+            mp.type = *type;
+            mp.name = pr.optString("name");
+            m.params.push_back(std::move(mp));
+        }
         return m;
     }
-    return Error(ErrorCode::InvalidField,
-                 ctx + " 应为字符串或对象");
+    return Error(ErrorCode::InvalidField, ctx + " 应为字符串或对象");
 }
 
 } // namespace

@@ -55,9 +55,19 @@ Result<Pin> loadPin(const std::string& name, const json::Value& obj) {
 Result<ToolchainSpec> loadToolchain(const json::Value& obj) {
     FieldReader r(obj, "toolchain");
     ToolchainSpec spec;
-    auto name = r.requireString("name");
-    if (!name) return name.error();
-    spec.name = *name;
+
+    // name 可选（兼容旧格式）
+    spec.name = r.optString("name");
+    spec.prefix = r.optString("prefix");
+    spec.cc = r.optString("cc");
+    spec.objcopy = r.optString("objcopy");
+    spec.size = r.optString("size");
+
+    // 至少要有一个标识
+    if (spec.name.empty() && spec.prefix.empty() && spec.cc.empty()) {
+        return Error(ErrorCode::MissingField,
+                     "toolchain 需要 name、prefix 或 cc 之一");
+    }
 
     auto ver = r.optString("version");
     if (!ver.empty()) {

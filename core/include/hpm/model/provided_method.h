@@ -20,14 +20,40 @@
 #include <hpm/types.h>
 
 #include <string>
+#include <vector>
 
 namespace hpm {
 
+struct MethodParam {
+    std::string type;   // "const unsigned char*"
+    std::string name;   // "tx"
+};
+
 // 驱动 provides 里的一个方法
-// 签名暂时用字符串（后续可解析成参数列表做严格检查）
 struct ProvidedMethod {
-    MethodName name;      // "transfer" / "read_card"
-    std::string signature; // 可选："int(uint8_t*, uint8_t*, size_t)"
+    MethodName name;
+    std::string returnType = "int";
+    std::vector<MethodParam> params;
+
+    // 生成参数列表字符串： "(const unsigned char* tx, unsigned char* rx, size_t len)"
+    std::string paramList() const {
+        if (params.empty()) return "(void)";
+        std::string out = "(";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i > 0) out += ", ";
+            out += params[i].type;
+            if (!params[i].name.empty()) {
+                out += " " + params[i].name;
+            }
+        }
+        out += ")";
+        return out;
+    }
+
+    // 生成完整声明
+    std::string declaration(const std::string& prefix) const {
+        return returnType + " " + prefix + name + paramList() + ";";
+    }
 };
 
 } // namespace hpm

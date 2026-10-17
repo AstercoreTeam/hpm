@@ -1,28 +1,17 @@
-// Copyright 2026 XueZicheng <xuezicheng842@outlook.com>
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // core/src/generator/generator.cpp
 #include <hpm/generator/generator.h>
 
 #include <hpm/util/fs_utils.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <set>
 #include <sstream>
 
 namespace hpm {
+
+namespace fs = std::filesystem;
 
 // ─────────────────────────────────────────────
 // 公共
@@ -49,8 +38,6 @@ Result<GenerationPlan> Generator::plan() {
 }
 
 Status Generator::write(const GenerationPlan& plan) {
-    namespace fs = std::filesystem;
-
     std::error_code ec;
     fs::create_directories(driverDir_, ec);
     if (ec) {
@@ -73,7 +60,7 @@ Status Generator::generate() {
 }
 
 // ─────────────────────────────────────────────
-// 实例
+// 实例收集 / 宏值
 // ─────────────────────────────────────────────
 
 std::vector<Generator::InstanceInfo> Generator::collectInstances() const {
@@ -98,6 +85,21 @@ std::string Generator::macroValue(const std::string& v) const {
 }
 
 // ─────────────────────────────────────────────
+// 查找芯片包目录
+// ─────────────────────────────────────────────
+
+fs::path Generator::findChipPackageDir() const {
+    if (!fs::exists(packageCacheDir_)) return {};
+    for (const auto& entry : fs::directory_iterator(packageCacheDir_)) {
+        if (!entry.is_directory()) continue;
+        auto name = entry.path().filename().string();
+        if (name.rfind(chip_.name + "-", 0) != 0) continue;
+        if (fs::exists(entry.path() / "chip.json")) return entry.path();
+    }
+    return {};
+}
+
+// ─────────────────────────────────────────────
 // driver.h
 // ─────────────────────────────────────────────
 
@@ -109,20 +111,24 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
     out << "#include <stddef.h>\n\n";
     out << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
 
+    // include 每个用户设备驱动的头
     for (const auto& dev : state_.userDevices) {
         out << "#include \"" << dev.name << "/" << dev.driver << ".h\"\n";
     }
     out << "\n";
 
+    // 声明每个用户设备的 API
     for (const auto& dev : state_.userDevices) {
         out << "// ---------- " << dev.name << " (" << dev.driver << ") ----------\n";
         const DriverManifest* dm = lib_.find(dev.driver);
         if (!dm) continue;
 
+        bool hasInit = false;
         for (const auto& m : dm->provides) {
-            out << "int " << dev.name << "_" << m.name << "(void);\n";
+            if (m.name == "init") hasInit = true;
+            out << m.declaration(dev.name + "_") << "\n";
         }
-        if (!dm->providesMethod("init")) {
+        if (!hasInit) {
             out << "int " << dev.name << "_init(void);\n";
         }
         out << "\n";
@@ -159,8 +165,6 @@ Status Generator::planInstance(GenerationPlan& plan,
                                const std::string& driverName,
                                const Version& version,
                                const std::map<ResourceKey, std::string>& bindings) {
-    namespace fs = std::filesystem;
-
     fs::path instDir = instanceName;
 
     // hpm_dev.h
@@ -183,15 +187,13 @@ Status Generator::planInstance(GenerationPlan& plan,
 }
 
 // ─────────────────────────────────────────────
-// 拷贝包源码
+// 拷贝包源码（src + include + ld）
 // ─────────────────────────────────────────────
 
 Status Generator::copyPackageSources(GenerationPlan& plan,
                                      const std::string& driver,
                                      const Version& version,
                                      const std::filesystem::path& targetDir) {
-    namespace fs = std::filesystem;
-
     auto pkgDir = packageCacheDir_ / (driver + "-" + version.toString());
     if (!fs::exists(pkgDir)) {
         return Error(ErrorCode::NotFound,
@@ -223,26 +225,7 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
 // ─────────────────────────────────────────────
 
 Status Generator::planChipDriver(GenerationPlan& plan) {
-    namespace fs = std::filesystem;
-
-    // 在 packageCacheDir_ 下找 <chipName>-* 目录
-    if (!fs::exists(packageCacheDir_)) {
-        return Error(ErrorCode::NotFound,
-                     "包目录不存在: " + packageCacheDir_.string());
-    }
-
-    fs::path chipPkgDir;
-    for (const auto& entry : fs::directory_iterator(packageCacheDir_)) {
-        if (!entry.is_directory()) continue;
-        auto name = entry.path().filename().string();
-        if (name.rfind(chip_.name + "-", 0) != 0) continue;
-
-        if (fs::exists(entry.path() / "chip.json")) {
-            chipPkgDir = entry.path();
-            break;
-        }
-    }
-
+    auto chipPkgDir = findChipPackageDir();
     if (chipPkgDir.empty()) {
         return Error(ErrorCode::NotFound,
                      "未找到芯片驱动包: " + chip_.name +
@@ -251,8 +234,7 @@ Status Generator::planChipDriver(GenerationPlan& plan) {
 
     fs::path chipTargetDir = chip_.name;
 
-    // 拷贝 src/ 和 include/
-    for (const char* sub : {"src", "include","ld"}) {
+    for (const char* sub : {"src", "include", "ld"}) {
         auto dir = chipPkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -280,38 +262,55 @@ void Generator::planMakefile(GenerationPlan& plan) {
     std::ostringstream out;
 
     out << "# 由 HPM 自动生成\n\n";
+    out << "CC := " << chip_.toolchain.resolveCc() << "\n";
+    out << "OBJCOPY := " << chip_.toolchain.resolveObjcopy() << "\n";
+    out << "SIZE := " << chip_.toolchain.resolveSize() << "\n\n";
 
-    // 工具链前缀从芯片驱动推导
-    std::string prefix;
-    {
-        const auto& tn = chip_.toolchain.name;   // 如 "arm-none-eabi-gcc"
-        auto pos = tn.find("gcc");
-        if (pos != std::string::npos && pos > 0) {
-            prefix = tn.substr(0, pos);          // "arm-none-eabi-"
+    // ── SRCS ──
+    // 1. driver.c（胶水）
+    // 2. 每个实例目录下的所有 .c（从包扫描）
+    // 3. 芯片驱动包 src/ 下的所有 .c
+    // 4. 用户 main.c
+    std::vector<std::string> srcs;
+    srcs.push_back("driver.c");
+
+    // 实例源文件：按包里的 src/ 内容决定，但写到实例目录下
+    for (const auto& inst : collectInstances()) {
+        auto pkgSrcDir = packageCacheDir_ /
+                         (inst.driver + "-" + inst.version.toString()) /
+                         "src";
+        if (!fs::exists(pkgSrcDir)) continue;
+
+        std::set<std::string> seen;
+        for (const auto& entry : fs::recursive_directory_iterator(pkgSrcDir)) {
+            if (!entry.is_regular_file()) continue;
+            if (entry.path().extension() != ".c") continue;
+
+            auto rel = fs::relative(entry.path(), pkgSrcDir);
+            auto target = inst.instanceName + "/" + rel.string();
+            if (seen.count(target)) continue;
+            seen.insert(target);
+            srcs.push_back(target);
         }
     }
 
-    out << "PREFIX ?= " << prefix << "\n";
-    out << "CC := $(PREFIX)gcc\n";
-    out << "OBJCOPY ?= $(PREFIX)objcopy\n\n";
+    // 芯片驱动源文件
+    {
+        auto chipPkgDir = findChipPackageDir();
+        if (!chipPkgDir.empty()) {
+            auto srcDir = chipPkgDir / "src";
+            if (fs::exists(srcDir)) {
+                for (const auto& entry : fs::recursive_directory_iterator(srcDir)) {
+                    if (!entry.is_regular_file()) continue;
+                    if (entry.path().extension() != ".c") continue;
 
-    // ── SRCS ──
-    std::vector<std::string> srcs;
-    srcs.push_back("driver.c");
-    for (const auto& inst : collectInstances()) {
-        srcs.push_back(inst.instanceName + "/" + inst.driver + ".c");
+                    auto rel = fs::relative(entry.path(), srcDir);
+                    srcs.push_back(chip_.name + "/" + rel.string());
+                }
+            }
+        }
     }
-    // 芯片驱动源：<chip>/<chip>.c、<chip>/hpm_pin.c、startup
-    srcs.push_back(chip_.name + "/" + chip_.name + ".c");
-    srcs.push_back(chip_.name + "/hpm_pin.c");
-    if (!chip_.build.startup.empty()) {
-        // startup 的路径里可能带 src/ 前缀，取出文件名
-        auto s = chip_.build.startup;
-        auto slash = s.find_last_of('/');
-        std::string fname = (slash == std::string::npos) ? s : s.substr(slash + 1);
-        srcs.push_back(chip_.name + "/" + fname);
-    }
-    // 用户 main.c
+
     srcs.push_back("../main.c");
 
     out << "SRCS := \\\n";
@@ -338,14 +337,14 @@ void Generator::planMakefile(GenerationPlan& plan) {
     }
     out << "\n";
 
-    // ── CFLAGS：芯片 flags + 通用 ──
+    // ── CFLAGS ──
     out << "CFLAGS := -std=gnu11 -Wall -Wextra -Wno-implicit-function-declaration -Os";
     for (const auto& f : chip_.build.flags) {
         out << " " << f;
     }
     out << " $(INCLUDES)\n";
 
-    // ── LDFLAGS：链接脚本 ──
+    // ── LDFLAGS ──
     out << "LDFLAGS :=";
     if (!chip_.build.ldscript.empty()) {
         auto s = chip_.build.ldscript;
@@ -373,7 +372,9 @@ void Generator::planMakefile(GenerationPlan& plan) {
     out << "\t@mkdir -p $(dir $@)\n";
     out << "\t$(CC) $(CFLAGS) -c $< -o $@\n\n";
 
-    out << ".PHONY: clean\n";
+    out << ".PHONY: clean size\n";
+    out << "size: $(TARGET)\n";
+    out << "\t$(SIZE) $<\n\n";
     out << "clean:\n";
     out << "\trm -rf $(BUILD_DIR)\n";
 
