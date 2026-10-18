@@ -451,7 +451,7 @@ void Generator::planMakefileSdcc(GenerationPlan& plan) {
     }
     out << "\n";
 
-    out << "CFLAGS := -mmcs51 --model-small";
+    out << "CFLAGS :=";
     for (const auto& f : chip_.build.flags) {
         out << " " << f;
     }
