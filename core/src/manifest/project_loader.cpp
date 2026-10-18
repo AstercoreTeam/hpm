@@ -34,12 +34,11 @@ Result<Device> loadDevice(const std::string& name,
     if (!driver) return driver.error();
     d.driver = *driver;
 
-    // 其他字段全部当作资源绑定（pin/bus/...）
-    // 约定：字段名 == requires 里的 key
+    // 其他字段：资源绑定（跳过 driver / version / config）
     auto keys = obj.keys();
     if (!keys) return keys.error();
     for (const auto& k : *keys) {
-        if (k == "driver" || k == "version") continue;
+        if (k == "driver" || k == "version" || k == "config") continue;
         auto v = obj.get(k);
         if (!v) return v.error();
         if (!v->isString()) {
@@ -52,7 +51,27 @@ Result<Device> loadDevice(const std::string& name,
         d.bindings[k] = *s;
     }
 
-    // 可选：版本
+    // config
+    if (obj.has("config")) {
+        auto cfgObj = r.requireObject("config");
+        if (!cfgObj) return cfgObj.error();
+
+        auto cfgKeys = cfgObj->keys();
+        if (!cfgKeys) return cfgKeys.error();
+        for (const auto& k : *cfgKeys) {
+            auto v = cfgObj->get(k);
+            if (!v) continue;
+            if (v->isString()) {
+                auto s = v->asString();
+                if (s) d.config[k] = *s;
+            } else if (v->isInt()) {
+                auto i = v->asInt();
+                if (i) d.config[k] = std::to_string(*i);
+            }
+        }
+    }
+
+    // 版本
     if (obj.has("version")) {
         auto vs = r.requireString("version");
         if (!vs) return vs.error();

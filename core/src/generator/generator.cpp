@@ -16,9 +16,9 @@
 #include <hpm/generator/generator.h>
 
 #include <hpm/util/fs_utils.h>
-#include "hpm/config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -40,7 +40,7 @@ Result<GenerationPlan> Generator::plan() {
 
     for (const auto& inst : collectInstances()) {
         auto st = planInstance(p, inst.instanceName, inst.driver,
-                               inst.version, inst.bindings);
+                               inst.version, inst.bindings, inst.config);
         if (!st.ok()) return st.error();
     }
 
@@ -81,10 +81,10 @@ Status Generator::generate() {
 std::vector<Generator::InstanceInfo> Generator::collectInstances() const {
     std::vector<InstanceInfo> out;
     for (const auto& d : state_.userDevices) {
-        out.push_back({d.name, d.driver, d.version, d.bindings});
+        out.push_back({d.name, d.driver, d.version, d.bindings, d.config});
     }
     for (const auto& d : state_.intermediateDevices) {
-        out.push_back({d.name, d.driver, d.version, d.bindings});
+        out.push_back({d.name, d.driver, d.version, d.bindings, d.config});
     }
     return out;
 }
@@ -109,7 +109,7 @@ fs::path Generator::findChipPackageDir() const {
         if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
         if (name.rfind(chip_.name + "-", 0) != 0) continue;
-        if (fs::exists(entry.path() / HPM_FILE_CHIP)) return entry.path();
+        if (fs::exists(entry.path() / "chip.json")) return entry.path();
     }
     return {};
 }
@@ -126,13 +126,25 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
     out << "#include <stddef.h>\n\n";
     out << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
 
-    // include 每个用户设备驱动的头
+    // 芯片头
+    out << "#include \"" << chip_.name << "/" << chip_.name << ".h\"\n";
+
+    // 设备驱动头
     for (const auto& dev : state_.userDevices) {
         out << "#include \"" << dev.name << "/" << dev.driver << ".h\"\n";
     }
     out << "\n";
 
-    // 声明每个用户设备的 API
+    // 芯片 API
+    if (!chip_.provides.empty()) {
+        out << "// ---------- " << chip_.name << " (chip) ----------\n";
+        for (const auto& m : chip_.provides) {
+            out << m.declaration(chip_.name + "_") << "\n";
+        }
+        out << "\n";
+    }
+
+    // 用户设备 API
     for (const auto& dev : state_.userDevices) {
         out << "// ---------- " << dev.name << " (" << dev.driver << ") ----------\n";
         const DriverManifest* dm = lib_.find(dev.driver);
@@ -149,9 +161,11 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
         out << "\n";
     }
 
+    out << "void hpm_init_all(void);\n";
+
     out << "#ifdef __cplusplus\n}\n#endif\n";
 
-    plan.addFile(HPM_FILE_DRIVER_H, out.str());
+    plan.addFile("driver.h", out.str());
 }
 
 // ─────────────────────────────────────────────
@@ -161,14 +175,20 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
 void Generator::planDriverSource(GenerationPlan& plan) {
     std::ostringstream out;
     out << "// 由 HPM 自动生成，请勿手动修改\n";
-    out << "#include \""<<HPM_FILE_DRIVER_H<<"\"\n\n";
+    out << "#include \"driver.h\"\n\n";
     out << "void hpm_init_all(void) {\n";
+
+    if (chip_.providesMethod("init")) {
+        out << "    " << chip_.name << "_init();\n";
+    }
+
     for (const auto& dev : state_.userDevices) {
         out << "    " << dev.name << "_init();\n";
     }
+
     out << "}\n";
 
-    plan.addFile(HPM_FILE_DRIVER_C, out.str());
+    plan.addFile("driver.c", out.str());
 }
 
 // ─────────────────────────────────────────────
@@ -179,8 +199,31 @@ Status Generator::planInstance(GenerationPlan& plan,
                                const std::string& instanceName,
                                const std::string& driverName,
                                const Version& version,
-                               const std::map<ResourceKey, std::string>& bindings) {
+                               const std::map<ResourceKey, std::string>& bindings,
+                               const std::map<std::string, std::string>& config) {
     fs::path instDir = instanceName;
+
+    const DriverManifest* dm = lib_.find(driverName);
+
+    // 检查工具链兼容性
+    if (dm && !dm->toolchain.empty()) {
+        auto cc = chip_.toolchain.resolveCc();
+        bool ok = false;
+        for (const auto& t : dm->toolchain) {
+            if (cc.find(t) != std::string::npos) { ok = true; break; }
+        }
+        if (!ok) {
+            std::string supported;
+            for (const auto& t : dm->toolchain) supported += t + " ";
+            return Error(ErrorCode::InvalidArgument,
+                         "驱动 " + driverName + " 不支持工具链 " + cc +
+                         "（支持: " + supported + "）");
+        }
+    }
+
+    // 先拷驱动源码
+    auto st = copyPackageSources(plan, driverName, version, instDir);
+    if (!st.ok()) return st.error();
 
     // hpm_dev.h
     {
@@ -191,18 +234,93 @@ Status Generator::planInstance(GenerationPlan& plan,
         for (const auto& [k, v] : bindings) {
             out << "#define " << k << "  " << macroValue(v) << "\n";
         }
-        plan.addFile(instDir / HPM_FILE_HPM_DEV_H, out.str());
+        plan.addFile(instDir / "hpm_dev.h", out.str());
     }
 
-    // 拷贝驱动源码
-    auto st = copyPackageSources(plan, driverName, version, instDir);
-    if (!st.ok()) return st.error();
+    // config.h
+    {
+        std::ostringstream out;
+        out << "// 由 HPM 自动生成，请勿手动修改\n";
+        out << "#pragma once\n\n";
+
+        // 普通配置
+        for (const auto& [k, v] : config) {
+            ConfigField cf;
+            if (dm && dm->config.count(k)) {
+                cf = dm->config.at(k);
+            }
+
+            if (cf.type == "string") {
+                std::string s = v;
+                if (cf.length > 0) {
+                    if (static_cast<int>(s.size()) < cf.length) {
+                        s.append(cf.length - s.size(), ' ');
+                    } else if (static_cast<int>(s.size()) > cf.length) {
+                        s = s.substr(0, cf.length);
+                    }
+                }
+                out << "#define " << k << "  \"" << s << "\"\n";
+            } else {
+                out << "#define " << k << "  " << v << "\n";
+            }
+        }
+
+        // 字符串描述符数组（只在驱动源码定义 HPM_GEN_STRINGS 时生成）
+        bool hasStrings = false;
+        for (const auto& [k, v] : config) {
+            if (dm && dm->config.count(k) && dm->config.at(k).type == "string") {
+                hasStrings = true;
+                break;
+            }
+        }
+
+        if (hasStrings) {
+            out << "\n// 字符串描述符（只在 usb_descr.c 里生成）\n";
+            out << "#define HPM_USB_STRINGS_DEFINED 1\n";
+            out << "#ifdef HPM_GEN_STRINGS\n";
+
+            auto genArray = [&](const std::string& key, const std::string& name) {
+                auto it = config.find(key);
+                if (it == config.end()) return;
+                auto cfIt = dm->config.find(key);
+                if (cfIt == dm->config.end()) return;
+                if (cfIt->second.type != "string") return;
+
+                std::string s = it->second;
+                int len = cfIt->second.length;
+                if (len > 0) {
+                    if (static_cast<int>(s.size()) < len) {
+                        s.append(len - s.size(), ' ');
+                    } else if (static_cast<int>(s.size()) > len) {
+                        s = s.substr(0, len);
+                    }
+                }
+
+                out << "__code uint16_t " << name << "[] = {\n";
+                out << "    (USB_DESCR_TYP_STRING << 8) | (2 + " << len << " * 2),\n    ";
+                for (int i = 0; i < len; ++i) {
+                    if (i > 0) out << ", ";
+                    out << "'" << s[i] << "'";
+                }
+                out << "\n};\n";
+            };
+
+            genArray("usb_manufacturer", "ManufDescr");
+            genArray("usb_product", "ProdDescr");
+            genArray("usb_serial", "SerDescr");
+            genArray("usb_interface", "InterfDescr");
+
+            out << "#endif\n";
+        }
+
+        plan.addFile(instDir / "config.h", out.str());
+    }
 
     return {};
 }
 
 // ─────────────────────────────────────────────
-// 拷贝包源码（src + include + ld）
+// 拷贝包源码
 // ─────────────────────────────────────────────
 
 Status Generator::copyPackageSources(GenerationPlan& plan,
@@ -215,7 +333,7 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
                      "驱动包未找到: " + pkgDir.string());
     }
 
-    for (const char* sub : {HPM_DIR_SRC, HPM_DIR_INCLUDE,HPM_DIR_LD}) {
+    for (const char* sub : {"src", "include", "ld"}) {
         auto dir = pkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -249,7 +367,7 @@ Status Generator::planChipDriver(GenerationPlan& plan) {
 
     fs::path chipTargetDir = chip_.name;
 
-    for (const char* sub : {HPM_DIR_SRC, HPM_DIR_INCLUDE,HPM_DIR_LD}) {
+    for (const char* sub : {"src", "include", "ld"}) {
         auto dir = chipPkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -273,76 +391,57 @@ Status Generator::planChipDriver(GenerationPlan& plan) {
 // Makefile
 // ─────────────────────────────────────────────
 
-void Generator::planMakefile(GenerationPlan& plan) {
-    std::ostringstream out;
-
-    out << "# 由 HPM 自动生成\n\n";
-    out << "CC := " << chip_.toolchain.resolveCc() << "\n";
-    out << "OBJCOPY := " << chip_.toolchain.resolveObjcopy() << "\n";
-    out << "SIZE := " << chip_.toolchain.resolveSize() << "\n\n";
-
-    // ── SRCS ──
-    // 1. driver.c（胶水）
-    // 2. 每个实例目录下的所有 .c（从包扫描）
-    // 3. 芯片驱动包 src/ 下的所有 .c
-    // 4. 用户 main.c
+std::vector<std::string> Generator::collectSources(const GenerationPlan& plan) const {
     std::vector<std::string> srcs;
-    srcs.push_back(HPM_FILE_DRIVER_C);
+    std::set<std::string> seen;
 
-    // 实例源文件：按包里的 src/ 内容决定，但写到实例目录下
-    for (const auto& inst : collectInstances()) {
-        auto pkgSrcDir = packageCacheDir_ /
-                         (inst.driver + "-" + inst.version.toString()) /
-                         HPM_DIR_SRC;
-        if (!fs::exists(pkgSrcDir)) continue;
+    srcs.push_back("driver.c");
+    seen.insert("driver.c");
 
-        std::set<std::string> seen;
-        for (const auto& entry : fs::recursive_directory_iterator(pkgSrcDir)) {
-            if (!entry.is_regular_file()) continue;
-            if (entry.path().extension() != ".c") continue;
-
-            auto rel = fs::relative(entry.path(), pkgSrcDir);
-            auto target = inst.instanceName + "/" + rel.string();
-            if (seen.count(target)) continue;
-            seen.insert(target);
-            srcs.push_back(target);
-        }
-    }
-
-    // 芯片驱动源文件
-    {
-        auto chipPkgDir = findChipPackageDir();
-        if (!chipPkgDir.empty()) {
-            auto srcDir = chipPkgDir / HPM_DIR_SRC;
-            if (fs::exists(srcDir)) {
-                for (const auto& entry : fs::recursive_directory_iterator(srcDir)) {
-                    if (!entry.is_regular_file()) continue;
-                    if (entry.path().extension() != ".c") continue;
-
-                    auto rel = fs::relative(entry.path(), srcDir);
-                    srcs.push_back(chip_.name + "/" + rel.string());
-                }
-            }
-        }
+    for (const auto& f : plan.files) {
+        if (f.relativePath.extension() != ".c") continue;
+        auto s = f.relativePath.string();
+        if (seen.count(s)) continue;
+        seen.insert(s);
+        srcs.push_back(s);
     }
 
     srcs.push_back("../main.c");
+    return srcs;
+}
 
-    out << "SRCS := \\\n";
-    for (size_t i = 0; i < srcs.size(); ++i) {
-        out << "    " << srcs[i];
-        if (i + 1 < srcs.size()) out << " \\";
-        out << "\n";
-    }
-    out << "\n";
-
-    // ── INCLUDES ──
+std::vector<std::string> Generator::collectIncludes() const {
     std::vector<std::string> includes;
     includes.push_back(".");
     includes.push_back(chip_.name);
     for (const auto& inst : collectInstances()) {
         includes.push_back(inst.instanceName);
     }
+    return includes;
+}
+
+void Generator::planMakefile(GenerationPlan& plan) {
+    auto cc = chip_.toolchain.resolveCc();
+    if (cc.find("sdcc") != std::string::npos) {
+        planMakefileSdcc(plan);
+    } else {
+        planMakefileGcc(plan);
+    }
+}
+
+// ─────────────────────────────────────────────
+// SDCC 风格
+// ─────────────────────────────────────────────
+
+void Generator::planMakefileSdcc(GenerationPlan& plan) {
+    std::ostringstream out;
+
+    auto srcs = collectSources(plan);
+    auto includes = collectIncludes();
+
+    out << "# 由 HPM 自动生成（SDCC）\n\n";
+    out << "CC := " << chip_.toolchain.resolveCc() << "\n";
+    out << "PACKIHX := " << chip_.toolchain.resolveObjcopy() << "\n\n";
 
     out << "INCLUDES := \\\n";
     for (size_t i = 0; i < includes.size(); ++i) {
@@ -352,14 +451,77 @@ void Generator::planMakefile(GenerationPlan& plan) {
     }
     out << "\n";
 
-    // ── CFLAGS ──
+    out << "CFLAGS := -mmcs51 --model-small";
+    for (const auto& f : chip_.build.flags) {
+        out << " " << f;
+    }
+    out << " $(INCLUDES)\n";
+    out << "LDFLAGS :=\n\n";
+
+    out << "SRCS := \\\n";
+    for (size_t i = 0; i < srcs.size(); ++i) {
+        out << "    " << srcs[i];
+        if (i + 1 < srcs.size()) out << " \\";
+        out << "\n";
+    }
+    out << "\n";
+
+    out << "OBJS := $(SRCS:.c=.rel)\n";
+    out << "TARGET := ../build/firmware.ihx\n";
+    out << "HEX    := ../build/firmware.hex\n\n";
+
+    out << "all: $(TARGET) $(HEX)\n\n";
+
+    out << "$(TARGET): $(OBJS)\n";
+    out << "\t@mkdir -p ../build\n";
+    out << "\t$(CC) $(OBJS) -o $@ $(LDFLAGS)\n\n";
+
+    out << "$(HEX): $(TARGET)\n";
+    out << "\t$(PACKIHX) $< > $@\n\n";
+
+    out << "%.rel: %.c\n";
+    out << "\t$(CC) $(CFLAGS) -c $< -o $@\n\n";
+
+    out << ".PHONY: clean\n";
+    out << "clean:\n";
+    out << "\tfind . -name \"*.rel\" -delete\n";
+    out << "\tfind . -name \"*.lst\" -delete\n";
+    out << "\tfind . -name \"*.sym\" -delete\n";
+    out << "\tfind . -name \"*.asm\" -delete\n";
+    out << "\trm -f $(TARGET) $(HEX)\n";
+
+    plan.addFile("Makefile", out.str());
+}
+
+// ─────────────────────────────────────────────
+// GCC 风格
+// ─────────────────────────────────────────────
+
+void Generator::planMakefileGcc(GenerationPlan& plan) {
+    std::ostringstream out;
+
+    auto srcs = collectSources(plan);
+    auto includes = collectIncludes();
+
+    out << "# 由 HPM 自动生成（GCC）\n\n";
+    out << "CC := " << chip_.toolchain.resolveCc() << "\n";
+    out << "OBJCOPY := " << chip_.toolchain.resolveObjcopy() << "\n";
+    out << "SIZE := " << chip_.toolchain.resolveSize() << "\n\n";
+
+    out << "INCLUDES := \\\n";
+    for (size_t i = 0; i < includes.size(); ++i) {
+        out << "    -I" << includes[i];
+        if (i + 1 < includes.size()) out << " \\";
+        out << "\n";
+    }
+    out << "\n";
+
     out << "CFLAGS := -std=gnu11 -Wall -Wextra -Wno-implicit-function-declaration -Os";
     for (const auto& f : chip_.build.flags) {
         out << " " << f;
     }
     out << " $(INCLUDES)\n";
 
-    // ── LDFLAGS ──
     out << "LDFLAGS :=";
     if (!chip_.build.ldscript.empty()) {
         auto s = chip_.build.ldscript;
@@ -371,6 +533,14 @@ void Generator::planMakefile(GenerationPlan& plan) {
 
     out << "BUILD_DIR := ../build\n";
     out << "OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))\n\n";
+
+    out << "SRCS := \\\n";
+    for (size_t i = 0; i < srcs.size(); ++i) {
+        out << "    " << srcs[i];
+        if (i + 1 < srcs.size()) out << " \\";
+        out << "\n";
+    }
+    out << "\n";
 
     out << "TARGET := $(BUILD_DIR)/firmware.elf\n";
     out << "BIN    := $(BUILD_DIR)/firmware.bin\n\n";
@@ -395,5 +565,4 @@ void Generator::planMakefile(GenerationPlan& plan) {
 
     plan.addFile("Makefile", out.str());
 }
-
 } // namespace hpm

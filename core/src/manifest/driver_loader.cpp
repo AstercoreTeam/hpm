@@ -93,8 +93,7 @@ Result<ProvidedMethod> loadProvidedMethod(const json::Value& v,
 
 Result<DriverManifest> loadDriverManifest(const json::Value& json) {
     if (!json.isObject()) {
-        return Error(ErrorCode::InvalidField,
-                     "驱动清单顶层必须是对象");
+        return Error(ErrorCode::InvalidField, "驱动清单顶层必须是对象");
     }
 
     FieldReader r(json);
@@ -113,6 +112,27 @@ Result<DriverManifest> loadDriverManifest(const json::Value& json) {
 
     dm.description = r.optString("description");
     dm.license = r.optString("license");
+
+    // config
+    auto cfgJson = r.optObject("config");
+    if (!cfgJson) return cfgJson.error();
+    if (cfgJson->isObject()) {
+        FieldReader cr(*cfgJson, "config");
+        auto keys = cr.keys();
+        if (!keys) return keys.error();
+        for (const auto& k : *keys) {
+            auto obj = cfgJson->get(k);
+            if (!obj) continue;
+            if (!obj->isObject()) continue;
+
+            ConfigField cf;
+            cf.type = obj->getString("type", "string");
+            cf.defaultValue = obj->getString("default");
+            cf.length = static_cast<int>(obj->getInt("length", 0));
+
+            dm.config[k] = cf;
+        }
+    }
 
     // requires
     auto reqJson = r.optObject("requires");
@@ -150,6 +170,14 @@ Result<DriverManifest> loadDriverManifest(const json::Value& json) {
                 if (!m) return m.error();
                 dm.provides.push_back(std::move(*m));
             }
+        }
+    }
+    // toolchain（可选）
+    auto tcJson = r.optArray("toolchain");
+    if (tcJson) {
+        for (const auto& t : *tcJson) {
+            auto s = t.asString();
+            if (s) dm.toolchain.push_back(*s);
         }
     }
 

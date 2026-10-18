@@ -72,6 +72,7 @@ Resolver::expandUserDevice(const Device& dev) {
     node->version = lockVersion(dev.driver);
     node->instanceName = dev.name;
     node->isTopLevel = true;
+    node->config = dev.config;
 
     std::vector<std::string> visited = {dev.driver};
     std::set<std::string>    consumed;   // 每个用户设备独立
@@ -216,6 +217,7 @@ Status Resolver::buildState(const ResolvedNode& root, DriverState& out) {
     userDev.driver = root.driver;
     userDev.version = root.version;
     userDev.userDeclared = true;
+    userDev.config = root.config;
 
     // 直接引脚
     for (const auto& [k, v] : root.pins) {
@@ -245,6 +247,7 @@ Status Resolver::buildIntermediate(const ResolvedNode& node,
     idev.name = node.instanceName;
     idev.driver = node.driver;
     idev.version = node.version;
+    idev.config = node.config;
 
     // 引脚
     for (const auto& [k, v] : node.pins) {

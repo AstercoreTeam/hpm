@@ -52,13 +52,19 @@ private:
     void planDriverHeader(GenerationPlan& plan);
     void planDriverSource(GenerationPlan& plan);
     void planMakefile(GenerationPlan& plan);
+    void planMakefileSdcc(GenerationPlan& plan);
+    void planMakefileGcc(GenerationPlan& plan);
+
+    std::vector<std::string> collectSources(const GenerationPlan& plan) const;
+    std::vector<std::string> collectIncludes() const;
     std::filesystem::path findChipPackageDir() const;
 
     Status planInstance(GenerationPlan& plan,
                         const std::string& instanceName,
                         const std::string& driverName,
                         const Version& version,
-                        const std::map<ResourceKey, std::string>& bindings);
+                        const std::map<ResourceKey, std::string>& bindings,
+                        const std::map<std::string, std::string>& config);
 
     Status planChipDriver(GenerationPlan& plan);
 
@@ -74,6 +80,7 @@ private:
         std::string driver;
         Version     version;
         std::map<ResourceKey, std::string> bindings;
+        std::map<std::string, std::string> config;
     };
     std::vector<InstanceInfo> collectInstances() const;
 

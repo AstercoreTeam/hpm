@@ -22,23 +22,33 @@
 #include <hpm/model/version.h>
 #include <hpm/types.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
 namespace hpm {
 
-// 驱动清单：描述一个驱动包「需要什么」和「提供什么」
-// 注意：不能用 requires 做成员名（C++20 关键字），用 requirements
+// 驱动配置字段
+struct ConfigField {
+    std::string type;         // "int" / "string"
+    std::string defaultValue;
+    int         length = 0;   // 字符串长度（type == "string" 时）
+};
+
+// 驱动清单
 struct DriverManifest {
-    DriverName name;                          // "rc522"
-    Version version;                          // 1.2.3
+    DriverName name;
+    Version version;
     std::string description;
     std::string license;
 
-    std::vector<Requirement>    requirements; // 需求列表
-    std::vector<ProvidedMethod> provides;     // 提供的方法
+    // 配置 schema
+    std::vector<std::string> toolchain;
+    std::map<std::string, ConfigField> config;
 
-    // 便捷查询：是否提供某个方法
+    std::vector<Requirement>    requirements;
+    std::vector<ProvidedMethod> provides;
+
     bool providesMethod(const MethodName& m) const {
         for (const auto& p : provides) {
             if (p.name == m) return true;
@@ -46,7 +56,6 @@ struct DriverManifest {
         return false;
     }
 
-    // 便捷查询：找某个 key 的需求
     const Requirement* findRequirement(const ResourceKey& key) const {
         for (const auto& r : requirements) {
             if (r.key == key) return &r;

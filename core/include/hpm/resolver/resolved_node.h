@@ -35,6 +35,7 @@ struct ResolvedNode {
 
     // 直接绑定到这个节点的引脚（key -> pin name）
     std::map<ResourceKey, std::string> pins;
+    std::map<std::string, std::string> config;
 
     // 子节点：key -> 子节点
     std::map<ResourceKey, std::unique_ptr<ResolvedNode>> children;

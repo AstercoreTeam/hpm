@@ -174,54 +174,89 @@ int SyncCmd::run(CmdContext& ctx) {
     // 3. 确保依赖包在本地
     Output::step("确保依赖包在本地");
 
-    registry::RegistryConfig cfg = registry::RegistryConfig::load();
-    if (offline_) cfg.offline = true;
-    if (skipSignature_) cfg.skipSignature = true;
-    cfg.cacheDir = ctx.cacheDir();
+    if (!offline_) {
+        registry::RegistryConfig cfg = registry::RegistryConfig::load();
+        if (skipSignature_) cfg.skipSignature = true;
+        cfg.cacheDir = ctx.cacheDir();
 
-    registry::RegistryClient client(cfg);
+        registry::RegistryClient client(cfg);
 
-    // 3a. 拉索引
-    std::optional<registry::Index> idx;
+        // 3a. 拉索引
+        std::optional<registry::Index> idx;
 
-    {
-        auto idxBar = util::ProgressBar(HPM_FILE_INDEX, 0);
-        auto idxResult = client.fetchIndex([&](uint64_t downloaded, uint64_t total) {
-            idxBar.update(downloaded, total);
-        });
-        if (!idxResult) {
-            idxBar.fail();
-            Output::error(idxResult.error().message());
-            return 1;
-        }
-        idxBar.done();
-        idx = std::move(*idxResult);
-        Output::detail("索引已加载（" + std::to_string(idx->packages.size()) + " 个包）");
-    }
-
-    // 3b. 展开依赖
-    auto needed = expandDependencies(*idx, proj->mcu, *proj);
-    if (!needed) {
-        Output::error(needed.error().message());
-        return 1;
-    }
-    Output::detail("需要 " + std::to_string(needed->size()) + " 个包");
-
-    // 3c. 下载
-    for (const auto& pkg : *needed) {
-        auto bar = util::ProgressBar(pkg.name + "@" + pkg.version, 0);
-        auto pkgPath = client.ensurePackage(pkg.name, pkg.version,
-            [&](uint64_t downloaded, uint64_t total) {
-                bar.update(downloaded, total);
+        {
+            auto idxBar = util::ProgressBar("index.json", 0);
+            auto idxResult = client.fetchIndex([&](uint64_t downloaded, uint64_t total) {
+                idxBar.update(downloaded, total);
             });
-        if (!pkgPath) {
-            bar.fail();
-            Output::error(pkgPath.error().message());
+            if (!idxResult) {
+                idxBar.fail();
+                Output::error(idxResult.error().message());
+                return 1;
+            }
+            idxBar.done();
+            idx = std::move(*idxResult);
+            Output::detail("索引已加载（" + std::to_string(idx->packages.size()) + " 个包）");
+        }
+
+        // 3b. 展开依赖
+        auto needed = expandDependencies(*idx, proj->mcu, *proj);
+        if (!needed) {
+            Output::error(needed.error().message());
             return 1;
         }
-        bar.done();
+        Output::detail("需要 " + std::to_string(needed->size()) + " 个包");
+
+        // 3c. 下载
+        for (const auto& pkg : *needed) {
+            auto bar = util::ProgressBar(pkg.name + "@" + pkg.version, 0);
+            auto pkgPath = client.ensurePackage(pkg.name, pkg.version,
+                [&](uint64_t downloaded, uint64_t total) {
+                    bar.update(downloaded, total);
+                });
+            if (!pkgPath) {
+                bar.fail();
+                Output::error(pkgPath.error().message());
+                return 1;
+            }
+            bar.done();
+        }
+        Output::success("所有依赖包已就绪");
+    } else {
+        // 离线模式：只检查芯片包存在
+        Output::detail("离线模式，跳过下载");
+
+        auto chipPkg = loadChipFromCache(ctx.packagesDir(), proj->mcu);
+        if (!chipPkg) {
+            Output::error("离线模式，芯片驱动未缓存: " + proj->mcu);
+            return 1;
+        }
+        Output::detail("芯片驱动: " + proj->mcu + " 已缓存");
+
+        // 检查所有设备驱动
+        for (const auto& dev : proj->devices) {
+            if (dev.version.toString() != "0.0.0") {
+                auto pkgDir = ctx.packagesDir() / (dev.driver + "-" + dev.version.toString());
+                if (!fs::exists(pkgDir)) {
+                    Output::error("离线模式，驱动未缓存: " + dev.driver + "@" + dev.version.toString());
+                    return 1;
+                }
+            } else {
+                // 扫目录找
+                bool found = false;
+                for (const auto& entry : fs::directory_iterator(ctx.packagesDir())) {
+                    if (!entry.is_directory()) continue;
+                    auto name = entry.path().filename().string();
+                    if (name.rfind(dev.driver + "-", 0) == 0) { found = true; break; }
+                }
+                if (!found) {
+                    Output::error("离线模式，驱动未缓存: " + dev.driver);
+                    return 1;
+                }
+            }
+        }
+        Output::success("所有依赖包已缓存");
     }
-    Output::success("所有依赖包已就绪");
 
     // 4. 加载芯片驱动
     Output::step("加载芯片驱动: " + proj->mcu);
@@ -285,7 +320,7 @@ int SyncCmd::run(CmdContext& ctx) {
     }
     Output::success("driver/ 已生成");
 
-    Output::info("下一步：hpm build");
+    //Output::info("下一步：hpm build");
     return 0;
 }
 

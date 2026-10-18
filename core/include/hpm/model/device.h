@@ -25,24 +25,16 @@
 
 namespace hpm {
 
-// 一个设备实例：用户在 project.json 里声明的
-// 例：
-//   "door_reader": {
-//       "driver": "rc522",
-//       "bus": "spi1",
-//       "cs": "PA4",
-//       "rst": "PA3"
-//   }
 struct Device {
-    DeviceName name;                       // "door_reader"（用户起的名）
-    DriverName driver;                     // "rc522"
-    Version    version;                    // 可选，驱动版本
+    DeviceName name;
+    DriverName driver;
+    Version    version;
 
-    // 资源 key → 值（引脚名 / 总线名 / 其他）
-    // "bus" → "spi1"，"cs" → "PA4"
     std::map<ResourceKey, std::string> bindings;
 
-    // 是否用户直接声明的（true）还是工具生成的中间设备（false）
+    // 用户配置：key -> 值（如 usb_vid、usb_pid）
+    std::map<std::string, std::string> config;
+
     bool userDeclared = true;
 };
 

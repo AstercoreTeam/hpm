@@ -68,7 +68,7 @@ int InitCmd::run(CmdContext& ctx) {
         }
     }
 
-    Output::info("下一步：编辑 project.json，然后运行 hpm sync");
+    //Output::info("下一步：编辑 project.json，然后运行 hpm sync");
     return 0;
 }
 

@@ -45,13 +45,34 @@ Result<Device> loadDeviceEntry(const std::string& name,
     auto keys = obj.keys();
     if (!keys) return keys.error();
     for (const auto& k : *keys) {
-        if (k == "driver" || k == "version" || k == "name") continue;
+        if (k == "driver" || k == "version" || k == "name" || k == "config") continue;
         auto v = obj.get(k);
         if (!v) return v.error();
         if (!v->isString()) continue;
         auto s = v->asString();
         if (!s) continue;
         d.bindings[k] = *s;
+    }
+
+    // config
+    if (obj.has("config")) {
+        auto cfgObj = obj.get("config");
+        if (cfgObj && cfgObj->isObject()) {
+            auto cfgKeys = cfgObj->keys();
+            if (cfgKeys) {
+                for (const auto& k : *cfgKeys) {
+                    auto v = cfgObj->get(k);
+                    if (!v) continue;
+                    if (v->isString()) {
+                        auto s = v->asString();
+                        if (s) d.config[k] = *s;
+                    } else if (v->isInt()) {
+                        auto i = v->asInt();
+                        if (i) d.config[k] = std::to_string(*i);
+                    }
+                }
+            }
+        }
     }
 
     return d;
@@ -65,6 +86,13 @@ json::Value saveDevice(const Device& d) {
     }
     for (const auto& [k, v] : d.bindings) {
         obj.set(k, json::Value(v));
+    }
+    if (!d.config.empty()) {
+        auto cfg = json::Value::object();
+        for (const auto& [k, v] : d.config) {
+            cfg.set(k, json::Value(v));
+        }
+        obj.set("config", cfg);
     }
     return obj;
 }
@@ -115,6 +143,7 @@ Result<DriverState> loadDriverState(const json::Value& json) {
             idev.driver = d->driver;
             idev.version = d->version;
             idev.bindings = std::move(d->bindings);
+            idev.config = std::move(d->config);   // ← 加这行
 
             state.intermediateDevices.push_back(std::move(idev));
         }
@@ -140,13 +169,15 @@ json::Value saveDriverState(const DriverState& state) {
 
     auto inter = json::Value::object();
     for (const auto& d : state.intermediateDevices) {
-        auto obj = saveDevice(Device{
-            .name = d.name,
-            .driver = d.driver,
-            .version = d.version,
-            .bindings = d.bindings,
-            .userDeclared = false,
-        });
+        Device dev;
+        dev.name = d.name;
+        dev.driver = d.driver;
+        dev.version = d.version;
+        dev.bindings = d.bindings;
+        dev.config = d.config;   // ← 加这行
+        dev.userDeclared = false;
+
+        auto obj = saveDevice(dev);
         obj.set("name", json::Value(d.name));
         inter.set(d.id, obj);
     }
