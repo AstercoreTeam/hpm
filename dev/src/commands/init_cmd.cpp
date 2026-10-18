@@ -307,12 +307,6 @@ int InitCmd::run(DevContext& ctx) {
 
     ok("已创建 " + pkgDir.string());
     std::cout << "\n";
-    std::cout << "下一步：\n";
-    std::cout << "  1. 编辑 " << (type_ == "chip" ? "chip.json" : "manifest.json") << "\n";
-    std::cout << "  2. 实现 src/ 里的驱动\n";
-    std::cout << "  3. hpm-dev validate " << pkgDir.string() << "\n";
-    std::cout << "  4. 复制到 ~/.hpm/packages/\n";
-
     return 0;
 }
 

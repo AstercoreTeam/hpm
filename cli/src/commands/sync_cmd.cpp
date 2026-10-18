@@ -320,7 +320,6 @@ int SyncCmd::run(CmdContext& ctx) {
     }
     Output::success("driver/ 已生成");
 
-    //Output::info("下一步：hpm build");
     return 0;
 }
 

@@ -11,10 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 // dev/src/main.cpp
 #include "dev_context.h"
 #include "commands/init_cmd.h"
+#include "commands/publish_cmd.h"
 #include "commands/validate_cmd.h"
 
 #include <CLI/CLI.hpp>
@@ -34,9 +34,13 @@ int main(int argc, char** argv) {
 
     // validate
     std::string path;
-    bool validate = false;
     auto* validateCmd = app.add_subcommand("validate", "校验驱动包格式");
     validateCmd->add_option("path", path, "驱动包目录")->required();
+
+    // publish
+    hpm::cli::PublishCmd publishCmd;
+    auto* publishSub = app.add_subcommand("publish", "打包 + 签名");
+    publishCmd.setup(*publishSub);
 
     CLI11_PARSE(app, argc, argv);
 
@@ -48,6 +52,9 @@ int main(int argc, char** argv) {
     }
     if (*validateCmd) {
         return hpm::cli::runValidate(ctx);
+    }
+    if (*publishSub) {
+        return publishCmd.run(ctx);
     }
 
     std::cout << app.help() << std::endl;
