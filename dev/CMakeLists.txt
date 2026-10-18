@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 add_executable(hpm-dev
     src/main.cpp
     src/dev_context.cpp
+    src/commands/init_cmd.cpp
     src/commands/validate_cmd.cpp
 )
 
@@ -22,4 +22,9 @@ target_link_libraries(hpm-dev
     PRIVATE
         hpm_core
         CLI11::CLI11
+)
+
+target_include_directories(hpm-dev
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

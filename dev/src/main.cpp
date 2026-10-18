@@ -14,6 +14,7 @@
 
 // dev/src/main.cpp
 #include "dev_context.h"
+#include "commands/init_cmd.h"
 #include "commands/validate_cmd.h"
 
 #include <CLI/CLI.hpp>
@@ -24,10 +25,16 @@
 int main(int argc, char** argv) {
     CLI::App app{"hpm-dev - HPM 驱动开发工具"};
     app.set_version_flag("--version", hpm::version());
+    app.require_subcommand(0, 1);
 
+    // init
+    hpm::cli::InitCmd initCmd;
+    auto* initSub = app.add_subcommand("init", "生成驱动包骨架");
+    initCmd.setup(*initSub);
+
+    // validate
     std::string path;
-
-    // --validate 子命令
+    bool validate = false;
     auto* validateCmd = app.add_subcommand("validate", "校验驱动包格式");
     validateCmd->add_option("path", path, "驱动包目录")->required();
 
@@ -36,6 +43,9 @@ int main(int argc, char** argv) {
     hpm::cli::DevContext ctx;
     ctx.setPath(path);
 
+    if (*initSub) {
+        return initCmd.run(ctx);
+    }
     if (*validateCmd) {
         return hpm::cli::runValidate(ctx);
     }
