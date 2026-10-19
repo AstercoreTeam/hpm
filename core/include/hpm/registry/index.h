@@ -49,28 +49,27 @@ struct PackageVersion {
 
 // 一个包的所有版本
 struct PackageInfo {
-    std::map<std::string, PackageVersion> versions;   // "1.0.0" -> info
+    std::map<std::string, PackageVersion> versions;
 };
 
 // 索引
 struct Index {
     int schema = 1;
-    std::string officialPub;   // 官方公钥 URL（仅参考，实际用硬编码地址）
+    std::string officialPub;
+    std::string baseUrl;   // 索引的 base URL（用于替换 {baseurl}）
+
     std::map<std::string, DeveloperInfo> developers;
     std::map<DriverName, PackageInfo> packages;
 
-    // 查找某个包的某个版本
     const PackageVersion* find(const std::string& name,
                                 const std::string& version) const;
-
-    // 查找某个包的最新版本
     const PackageVersion* findLatest(const std::string& name) const;
-
-    // 找最新版本号
     std::string findLatestVersion(const std::string& name) const;
 };
 
 // 解析 index.json
-Result<Index> parseIndex(const std::string& jsonText);
+// baseUrl: 索引的 base URL（用于替换 {baseurl}）
+Result<Index> parseIndex(const std::string& jsonText,
+                         const std::string& baseUrl = "");
 
 } // namespace hpm::registry

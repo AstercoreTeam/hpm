@@ -259,6 +259,7 @@ Result<void> RegistryClient::httpDownload(
 Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
     if (indexLoaded_) return cachedIndex_;
 
+    // 1. 确保官方公钥
     if (!config_.skipSignature) {
         OfficialKeyManager keyMgr(config_.cacheDir);
         auto key = keyMgr.ensure();
@@ -271,13 +272,23 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
 
     std::string lastError;
 
+    // 2. 尝试每个镜像
     for (const auto& url : config_.registries) {
+        // 2a. 下载 index.json
         auto text = httpGet(url, progress);
         if (!text) {
             lastError = text.error().message();
             continue;
         }
 
+        // 2b. 算 baseUrl（索引 URL 的目录）
+        std::string baseUrl = url;
+        auto slash = baseUrl.find_last_of('/');
+        if (slash != std::string::npos) {
+            baseUrl = baseUrl.substr(0, slash);
+        }
+
+        // 2c. 下载 index.json.sig
         if (!config_.skipSignature) {
             auto sigUrl = url + ".sig";
             auto sigText = httpGet(sigUrl);
@@ -286,10 +297,10 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
                 continue;
             }
 
-            auto tmpDir = config_.cacheDir / HPM_TMP_DIR_NAME;
+            auto tmpDir = config_.cacheDir / "cache" / "tmp";
             std::filesystem::create_directories(tmpDir);
-            auto tmpIndex = tmpDir / HPM_FILE_INDEX;
-            auto tmpSig = tmpDir / HPM_FILE_INDEX_SIG;
+            auto tmpIndex = tmpDir / "index.json";
+            auto tmpSig = tmpDir / "index.json.sig";
 
             {
                 std::ofstream f(tmpIndex);
@@ -300,6 +311,7 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
                 f << *sigText;
             }
 
+            // 2d. 用官方公钥验证
             auto ok = verifySignature(officialPubKey_, tmpSig, tmpIndex);
             if (!ok) {
                 lastError = "索引签名验证失败: " + ok.error().message();
@@ -311,7 +323,8 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
             }
         }
 
-        auto idx = parseIndex(*text);
+        // 2e. 解析（传 baseUrl）
+        auto idx = parseIndex(*text, baseUrl);
         if (!idx) {
             lastError = idx.error().message();
             continue;

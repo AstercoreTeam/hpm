@@ -19,6 +19,23 @@
 
 namespace hpm::registry {
 
+namespace {
+
+// 把 {baseurl} 替换成 baseUrl
+std::string replaceBaseUrl(const std::string& url, const std::string& baseUrl) {
+    if (baseUrl.empty()) return url;
+
+    const std::string placeholder = "{baseurl}";
+    auto pos = url.find(placeholder);
+    if (pos == std::string::npos) return url;
+
+    std::string result = url;
+    result.replace(pos, placeholder.size(), baseUrl);
+    return result;
+}
+
+} // namespace
+
 const PackageVersion* Index::find(const std::string& name,
                                    const std::string& version) const {
     auto it = packages.find(name);
@@ -64,7 +81,8 @@ std::string Index::findLatestVersion(const std::string& name) const {
     return best;
 }
 
-Result<Index> parseIndex(const std::string& jsonText) {
+Result<Index> parseIndex(const std::string& jsonText,
+                         const std::string& baseUrl) {
     auto j = json::parse(jsonText);
     if (!j) return j.error();
     if (!j->isObject()) {
@@ -73,7 +91,8 @@ Result<Index> parseIndex(const std::string& jsonText) {
 
     Index idx;
     idx.schema = static_cast<int>(j->getInt("schema", 1));
-    idx.officialPub = j->getString("official_pub");
+    idx.baseUrl = baseUrl;
+    idx.officialPub = replaceBaseUrl(j->getString("official_pub"), baseUrl);
 
     // developers
     auto devsJson = j->get("developers");
@@ -85,8 +104,8 @@ Result<Index> parseIndex(const std::string& jsonText) {
                 if (!dvJson || !dvJson->isObject()) continue;
 
                 DeveloperInfo di;
-                di.pub    = dvJson->getString("pub");
-                di.pubSig = dvJson->getString("pub_sig");
+                di.pub = replaceBaseUrl(dvJson->getString("pub"), baseUrl);
+                di.pubSig = replaceBaseUrl(dvJson->getString("pub_sig"), baseUrl);
                 idx.developers[devName] = std::move(di);
             }
         }
@@ -122,8 +141,8 @@ Result<Index> parseIndex(const std::string& jsonText) {
             PackageVersion pv;
             pv.kind      = vJson->getString("kind", "driver");
             pv.developer = vJson->getString("developer");
-            pv.url       = vJson->getString("url");
-            pv.sigUrl    = vJson->getString("sig_url");
+            pv.url       = replaceBaseUrl(vJson->getString("url"), baseUrl);
+            pv.sigUrl    = replaceBaseUrl(vJson->getString("sig_url"), baseUrl);
             pv.sha256    = vJson->getString("sha256");
             pv.size      = static_cast<uint64_t>(vJson->getInt("size", 0));
             pv.license   = vJson->getString("license");
