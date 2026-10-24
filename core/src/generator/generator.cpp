@@ -516,7 +516,9 @@ void Generator::planMakefileGcc(GenerationPlan& plan) {
     }
     out << "\n";
 
+    // 加入了 -specs=nosys.specs 和 -specs=nano.specs
     out << "CFLAGS := -std=gnu11 -Wall -Wextra -Wno-implicit-function-declaration -Os";
+    out << " -specs=nosys.specs -specs=nano.specs";
     for (const auto& f : chip_.build.flags) {
         out << " " << f;
     }
@@ -529,11 +531,12 @@ void Generator::planMakefileGcc(GenerationPlan& plan) {
         std::string fname = (slash == std::string::npos) ? s : s.substr(slash + 1);
         out << " -T " << chip_.name << "/" << fname;
     }
-    out << " -Wl,--gc-sections\n\n";
+    // 链接阶段同样加入 -specs=nosys.specs 防止引用 crt0 和系统调用
+    out << " -Wl,--gc-sections -specs=nosys.specs -specs=nano.specs\n\n";
 
-    out << "BUILD_DIR := ../build\n";
-    out << "OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))\n\n";
+    out << "BUILD_DIR := ../build\n\n";
 
+    // 【修复】把 SRCS 的定义放到了 OBJS 前面
     out << "SRCS := \\\n";
     for (size_t i = 0; i < srcs.size(); ++i) {
         out << "    " << srcs[i];
@@ -541,6 +544,8 @@ void Generator::planMakefileGcc(GenerationPlan& plan) {
         out << "\n";
     }
     out << "\n";
+
+    out << "OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))\n\n";
 
     out << "TARGET := $(BUILD_DIR)/firmware.elf\n";
     out << "BIN    := $(BUILD_DIR)/firmware.bin\n\n";
