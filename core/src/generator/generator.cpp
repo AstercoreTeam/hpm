@@ -182,6 +182,12 @@ void Generator::planDriverSource(GenerationPlan& plan) {
         out << "    " << chip_.name << "_init();\n";
     }
 
+    // 1. 初始化中间设备（比如自动生成的 sys_tick）
+    for (const auto& idev : state_.intermediateDevices) {
+        out << "    " << idev.name << "_init();\n";
+    }
+
+    // 2. 初始化用户设备（app_delay, servo）
     for (const auto& dev : state_.userDevices) {
         out << "    " << dev.name << "_init();\n";
     }
@@ -230,6 +236,12 @@ Status Generator::planInstance(GenerationPlan& plan,
         std::ostringstream out;
         out << "// 由 HPM 自动生成，请勿手动修改\n";
         out << "#pragma once\n\n";
+        
+        // 【修复 1】：使用宏守卫避免 DEVICE_NAME 重定义
+        out << "#ifdef DEVICE_NAME\n";
+        out << "#undef DEVICE_NAME\n";
+        out << "#endif\n";
+        
         out << "#define DEVICE_NAME  " << instanceName << "\n\n";
         for (const auto& [k, v] : bindings) {
             out << "#define " << k << "  " << macroValue(v) << "\n";
@@ -243,8 +255,24 @@ Status Generator::planInstance(GenerationPlan& plan,
         out << "// 由 HPM 自动生成，请勿手动修改\n";
         out << "#pragma once\n\n";
 
-        // 普通配置
-        for (const auto& [k, v] : config) {
+        // 【修复 2】：如果是中间设备，向上寻找它的父设备配置并继承
+        std::map<std::string, std::string> finalConfig = config;
+        if (instanceName.rfind("__", 0) == 0) { // 名字以 __ 开头，是中间设备
+            for (const auto& userDev : state_.userDevices) {
+                for (const auto& [key, val] : userDev.bindings) {
+                    if (val == instanceName) {
+                        // 找到了依赖它的顶层设备，把顶层设备的 config 继承过来
+                        for (const auto& [ck, cv] : userDev.config) {
+                            finalConfig[ck] = cv;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 普通配置（使用合并后的 finalConfig）
+        for (const auto& [k, v] : finalConfig) {
             ConfigField cf;
             if (dm && dm->config.count(k)) {
                 cf = dm->config.at(k);
@@ -265,9 +293,9 @@ Status Generator::planInstance(GenerationPlan& plan,
             }
         }
 
-        // 字符串描述符数组（只在驱动源码定义 HPM_GEN_STRINGS 时生成）
+        // 字符串描述符数组检查也要用 finalConfig
         bool hasStrings = false;
-        for (const auto& [k, v] : config) {
+        for (const auto& [k, v] : finalConfig) {
             if (dm && dm->config.count(k) && dm->config.at(k).type == "string") {
                 hasStrings = true;
                 break;
@@ -280,8 +308,8 @@ Status Generator::planInstance(GenerationPlan& plan,
             out << "#ifdef HPM_GEN_STRINGS\n";
 
             auto genArray = [&](const std::string& key, const std::string& name) {
-                auto it = config.find(key);
-                if (it == config.end()) return;
+                auto it = finalConfig.find(key); // 改成 finalConfig
+                if (it == finalConfig.end()) return;
                 auto cfIt = dm->config.find(key);
                 if (cfIt == dm->config.end()) return;
                 if (cfIt->second.type != "string") return;
@@ -536,7 +564,6 @@ void Generator::planMakefileGcc(GenerationPlan& plan) {
 
     out << "BUILD_DIR := ../build\n\n";
 
-    // 【修复】把 SRCS 的定义放到了 OBJS 前面
     out << "SRCS := \\\n";
     for (size_t i = 0; i < srcs.size(); ++i) {
         out << "    " << srcs[i];

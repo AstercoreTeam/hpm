@@ -41,9 +41,24 @@ struct ProvidedMethod {
         std::string out = "(";
         for (size_t i = 0; i < params.size(); ++i) {
             if (i > 0) out += ", ";
-            out += params[i].type;
-            if (!params[i].name.empty()) {
-                out += " " + params[i].name;
+            
+            const auto& p = params[i];
+            // 检查是否是函数指针类型，例如 "void (*)(void)"
+            size_t pos = p.type.find("(*)");
+            if (pos != std::string::npos) {
+                // 是函数指针，把参数名插入到 * 后面
+                // 比如 "void (*)(void)" + "callback" => "void (*callback)(void)"
+                std::string t = p.type;
+                if (!p.name.empty()) {
+                    t.insert(pos + 2, p.name); 
+                }
+                out += t;
+            } else {
+                // 普通类型
+                out += p.type;
+                if (!p.name.empty()) {
+                    out += " " + p.name;
+                }
             }
         }
         out += ")";
