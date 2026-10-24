@@ -34,6 +34,7 @@ private:
     std::string pkgDir_;
     std::string keyPath_;
     std::string outDir_;
+    std::string algorithm_ = "auto";   // "auto" / "rsa" / "ec" / "ed25519"
 };
 
 } // namespace hpm::cli

@@ -17,6 +17,7 @@
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/sha.h>
 
 #include <fstream>
 #include <iomanip>
@@ -49,6 +50,7 @@ std::string toHex(const unsigned char* data, size_t len) {
 Result<bool> verifySignature(const std::filesystem::path& pubKeyPem,
                               const std::filesystem::path& sigFile,
                               const std::filesystem::path& dataFile) {
+    // 读公钥
     FILE* pubFile = fopen(pubKeyPem.string().c_str(), "r");
     if (!pubFile) {
         return Error(ErrorCode::IoError,
@@ -62,6 +64,7 @@ Result<bool> verifySignature(const std::filesystem::path& pubKeyPem,
                      "公钥格式错误: " + pubKeyPem.string());
     }
 
+    // 读签名
     auto sig = readFile(sigFile);
     if (sig.empty()) {
         EVP_PKEY_free(pkey);
@@ -69,6 +72,7 @@ Result<bool> verifySignature(const std::filesystem::path& pubKeyPem,
                      "无法读签名: " + sigFile.string());
     }
 
+    // 读数据
     auto data = readFile(dataFile);
     if (data.empty()) {
         EVP_PKEY_free(pkey);
@@ -76,12 +80,39 @@ Result<bool> verifySignature(const std::filesystem::path& pubKeyPem,
                      "无法读数据: " + dataFile.string());
     }
 
+    // 根据密钥类型选 digest
+    int keyType = EVP_PKEY_base_id(pkey);
+    const EVP_MD* md = nullptr;
+
+    if (keyType == EVP_PKEY_RSA) {
+        md = EVP_sha256();
+    } else if (keyType == EVP_PKEY_EC) {
+        md = EVP_sha256();
+    } else if (keyType == EVP_PKEY_ED25519) {
+        md = nullptr;   // Ed25519 不做哈希
+    } else if (keyType == EVP_PKEY_ED448) {
+        md = nullptr;   // Ed448 也不做哈希
+    } else {
+        EVP_PKEY_free(pkey);
+        return Error(ErrorCode::InvalidField,
+                     "不支持的密钥类型: " + std::to_string(keyType));
+    }
+
+    // 验证
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     bool ok = false;
     if (ctx) {
-        if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pkey) == 1) {
-            if (EVP_DigestVerifyUpdate(ctx, data.data(), data.size()) == 1) {
-                int rc = EVP_DigestVerifyFinal(ctx, sig.data(), sig.size());
+        if (EVP_DigestVerifyInit(ctx, nullptr, md, nullptr, pkey) == 1) {
+            if (md) {
+                // RSA / ECDSA：先 update 再 final
+                if (EVP_DigestVerifyUpdate(ctx, data.data(), data.size()) == 1) {
+                    int rc = EVP_DigestVerifyFinal(ctx, sig.data(), sig.size());
+                    ok = (rc == 1);
+                }
+            } else {
+                // Ed25519 / Ed448：一次性 verify
+                int rc = EVP_DigestVerify(ctx, sig.data(), sig.size(),
+                                           data.data(), data.size());
                 ok = (rc == 1);
             }
         }
