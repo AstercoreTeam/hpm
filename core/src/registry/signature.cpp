@@ -160,28 +160,35 @@ std::string sha256File(const std::filesystem::path& file) {
 }
 
 std::string publicKeyFingerprint(const std::filesystem::path& pubKeyPem) {
-    auto data = readFile(pubKeyPem);
-    if (data.empty()) return "";
+    // 读 PEM
+    FILE* f = fopen(pubKeyPem.string().c_str(), "r");
+    if (!f) return "";
+    EVP_PKEY* pkey = PEM_read_PUBKEY(f, nullptr, nullptr, nullptr);
+    fclose(f);
+    if (!pkey) return "";
 
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hashLen = 0;
-
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (!ctx) return "";
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-        EVP_MD_CTX_free(ctx);
+    // 转 DER
+    int derLen = i2d_PUBKEY(pkey, nullptr);
+    if (derLen <= 0) {
+        EVP_PKEY_free(pkey);
         return "";
     }
-    EVP_DigestUpdate(ctx, data.data(), data.size());
-    EVP_DigestFinal_ex(ctx, hash, &hashLen);
-    EVP_MD_CTX_free(ctx);
 
-    auto hex = toHex(hash, hashLen);
+    std::vector<unsigned char> der(derLen);
+    unsigned char* p = der.data();
+    i2d_PUBKEY(pkey, &p);
+    EVP_PKEY_free(pkey);
 
+    // SHA256(DER)
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(der.data(), der.size(), hash);
+
+    // 格式化成 XX:XX:...
     std::ostringstream oss;
-    for (size_t i = 0; i < hex.size(); i += 2) {
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
         if (i > 0) oss << ":";
-        oss << hex.substr(i, 2);
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(hash[i]);
     }
     return oss.str();
 }
