@@ -105,10 +105,24 @@ std::string Generator::macroValue(const std::string& v) const {
 
 fs::path Generator::findChipPackageDir() const {
     if (!fs::exists(packageCacheDir_)) return {};
-    for (const auto& entry : fs::directory_iterator(packageCacheDir_)) {
+
+    // chip_.name 可能是 "domain/name"
+    fs::path dir = packageCacheDir_;
+    std::string name = chip_.name;
+
+    auto slash = chip_.name.find('/');
+    if (slash != std::string::npos) {
+        auto domain = chip_.name.substr(0, slash);
+        name = chip_.name.substr(slash + 1);
+        dir = dir / domain;
+    }
+
+    if (!fs::exists(dir)) return {};
+
+    for (const auto& entry : fs::directory_iterator(dir)) {
         if (!entry.is_directory()) continue;
-        auto name = entry.path().filename().string();
-        if (name.rfind(chip_.name + "-", 0) != 0) continue;
+        auto n = entry.path().filename().string();
+        if (n.rfind(name + "-", 0) != 0) continue;
         if (fs::exists(entry.path() / "chip.json")) return entry.path();
     }
     return {};
@@ -355,7 +369,18 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
                                      const std::string& driver,
                                      const Version& version,
                                      const std::filesystem::path& targetDir) {
-    auto pkgDir = packageCacheDir_ / (driver + "-" + version.toString());
+    // driver 可能是 "domain/name"
+    fs::path pkgBaseDir = packageCacheDir_;
+    std::string name = driver;
+
+    auto slash = driver.find('/');
+    if (slash != std::string::npos) {
+        auto domain = driver.substr(0, slash);
+        name = driver.substr(slash + 1);
+        pkgBaseDir = pkgBaseDir / domain;
+    }
+
+    auto pkgDir = pkgBaseDir / (name + "-" + version.toString());
     if (!fs::exists(pkgDir)) {
         return Error(ErrorCode::NotFound,
                      "驱动包未找到: " + pkgDir.string());

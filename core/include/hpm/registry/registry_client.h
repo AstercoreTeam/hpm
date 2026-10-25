@@ -28,7 +28,6 @@
 
 namespace hpm::registry {
 
-// 镜像配置
 struct RegistryConfig {
     std::vector<std::string> registries;
     std::filesystem::path    cacheDir;
@@ -45,30 +44,42 @@ public:
     explicit RegistryClient(const RegistryConfig& config);
     ~RegistryClient();
 
-    // 拉取索引（多镜像 fallback + 签名验证）
+    // 拉主索引（多镜像 fallback + 签名验证）
     Result<Index> fetchIndex(DownloadProgress progress = nullptr);
 
-    // 确保包在本地（缓存或下载 + 签名验证）
+    // 拉域索引（带缓存 + 信任链验证）
+    Result<const Index*> fetchDomainIndex(const std::string& domain,
+                                           DownloadProgress progress = nullptr);
+
+    // 确保包在本地（支持 "domain/name" 格式）
     Result<std::filesystem::path> ensurePackage(
-        const std::string& name,
+        const std::string& fullName,   // "name" 或 "domain/name"
         const std::string& version,
         DownloadProgress progress = nullptr);
 
     std::filesystem::path packagesDir() const;
     std::filesystem::path tarballsDir() const;
 
+    // 解析 "domain/name" 或 "name"
+    static void splitName(const std::string& fullName,
+                          std::string& domain,
+                          std::string& name);
+
 private:
     // HTTP
-    Result<std::string> httpGet(const std::string& url,DownloadProgress progress = nullptr);
+    Result<std::string> httpGet(const std::string& url,
+                                 DownloadProgress progress = nullptr);
     Result<void> httpDownload(const std::string& url,
                               const std::filesystem::path& dest,
                               DownloadProgress progress);
 
     // 签名验证
     Result<std::filesystem::path> fetchAndVerifyDeveloperKey(
+        const std::string& domain,       // 空 = 主仓库
         const std::string& devName);
     Status verifyPackageSignature(const std::filesystem::path& tarball,
                                    const std::string& sigUrl,
+                                   const std::string& domain,
                                    const std::string& devName);
 
     // 解压
@@ -80,7 +91,12 @@ private:
     bool           indexLoaded_ = false;
 
     std::filesystem::path officialPubKey_;
-    std::map<std::string, std::filesystem::path> developerKeys_;
+
+    // 域缓存
+    std::map<std::string, Index>                  domainIndexes_;
+    std::map<std::string, std::filesystem::path>  domainPubKeys_;
+
+    std::map<std::string, std::filesystem::path>  developerKeys_;
 };
 
 } // namespace hpm::registry

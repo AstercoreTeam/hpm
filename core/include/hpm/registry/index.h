@@ -33,6 +33,13 @@ struct DeveloperInfo {
     std::string pubSig;    // 公钥签名 URL
 };
 
+// 域信息
+struct DomainInfo {
+    std::string index;           // 域索引 URL
+    std::string officialPub;     // 域官方公钥 URL
+    std::string officialPubSig;  // 域官方公钥签名 URL（用主仓库私钥签）
+};
+
 // 索引里的一个包版本
 struct PackageVersion {
     std::string kind;       // "driver" / "chip"
@@ -56,10 +63,11 @@ struct PackageInfo {
 struct Index {
     int schema = 1;
     std::string officialPub;
-    std::string baseUrl;   // 索引的 base URL（用于替换 {baseurl}）
+    std::string baseUrl;
 
     std::map<std::string, DeveloperInfo> developers;
-    std::map<DriverName, PackageInfo> packages;
+    std::map<std::string, DomainInfo>    domains;     // 域列表
+    std::map<DriverName, PackageInfo>    packages;
 
     const PackageVersion* find(const std::string& name,
                                 const std::string& version) const;
@@ -67,8 +75,6 @@ struct Index {
     std::string findLatestVersion(const std::string& name) const;
 };
 
-// 解析 index.json
-// baseUrl: 索引的 base URL（用于替换 {baseurl}）
 Result<Index> parseIndex(const std::string& jsonText,
                          const std::string& baseUrl = "");
 

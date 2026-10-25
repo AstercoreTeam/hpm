@@ -29,7 +29,6 @@
 #include <hpm/registry/registry_client.h>
 #include <hpm/resolver/resolver.h>
 #include <hpm/util/progress_bar.h>
-#include "hpm/config.h"
 
 #include <filesystem>
 #include <iostream>
@@ -49,42 +48,84 @@ Result<Chip> loadChipFromCache(const fs::path& packagesDir,
         return Error(ErrorCode::NotFound,
                      "包目录不存在: " + packagesDir.string());
     }
-    for (const auto& entry : fs::directory_iterator(packagesDir)) {
+
+    fs::path dir = packagesDir;
+    std::string name = mcu;
+
+    auto slash = mcu.find('/');
+    if (slash != std::string::npos) {
+        auto domain = mcu.substr(0, slash);
+        name = mcu.substr(slash + 1);
+        dir = dir / domain;
+    }
+
+    if (!fs::exists(dir)) {
+        return Error(ErrorCode::NotFound,
+                     "域目录不存在: " + dir.string());
+    }
+
+    for (const auto& entry : fs::directory_iterator(dir)) {
         if (!entry.is_directory()) continue;
-        auto name = entry.path().filename().string();
-        if (name.rfind(mcu + "-", 0) != 0) continue;
-        auto chipJson = entry.path() / HPM_FILE_CHIP;
+        auto n = entry.path().filename().string();
+        if (n.rfind(name + "-", 0) != 0) continue;
+        auto chipJson = entry.path() / "chip.json";
         if (fs::exists(chipJson)) {
             return manifest::loadChipFile(chipJson);
         }
     }
     return Error(ErrorCode::NotFound,
-                 "未找到芯片驱动: " + mcu + "（在 " + packagesDir.string() + " 下）");
+                 "未找到芯片驱动: " + mcu);
 }
 
 DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
     DriverLibrary lib;
     if (!fs::exists(packagesDir)) return lib;
 
+    // 扫描一个目录，domain 是域前缀（空表示主仓库）
+    auto scan = [&](const fs::path& dir, const std::string& domain) {
+        if (!fs::exists(dir)) return;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_directory()) continue;
+            auto mf = entry.path() / "manifest.json";
+            if (!fs::exists(mf)) continue;
+            auto dm = manifest::loadDriverManifestFile(mf);
+            if (dm.ok()) {
+                if (!domain.empty()) {
+                    dm->name = domain + "/" + dm->name;
+                }
+                lib.add(std::move(*dm));
+            }
+        }
+    };
+
+    // 1. 扫主仓库包（<packages>/<name>-<version>/manifest.json）
+    scan(packagesDir, "");
+
+    // 2. 扫域目录（<packages>/<domain>/<name>-<version>/manifest.json）
     for (const auto& entry : fs::directory_iterator(packagesDir)) {
         if (!entry.is_directory()) continue;
-        auto mf = entry.path() / HPM_FILE_MANIFEST;
-        if (!fs::exists(mf)) continue;
-        auto dm = manifest::loadDriverManifestFile(mf);
-        if (dm.ok()) {
-            lib.add(std::move(*dm));
+
+        // 如果 entry 里直接有 manifest.json 或 chip.json，是主仓库包，跳过
+        if (fs::exists(entry.path() / "manifest.json") ||
+            fs::exists(entry.path() / "chip.json")) {
+            continue;
         }
+
+        // 否则是域目录
+        scan(entry.path(), entry.path().filename().string());
     }
+
     return lib;
 }
 
 struct NeededPackage {
-    std::string name;
+    std::string fullName;   // "name" 或 "domain/name"
     std::string version;
 };
 
 Result<std::vector<NeededPackage>> expandDependencies(
-    const registry::Index& idx,
+    registry::RegistryClient& client,
+    const registry::Index& mainIdx,
     const std::string& mcu,
     const Project& proj) {
 
@@ -109,33 +150,55 @@ Result<std::vector<NeededPackage>> expandDependencies(
         if (visited.count(item)) continue;
         visited.insert(item);
 
-        std::string name = item;
+        // 解析 domain/name@version
+        std::string fullName = item;
         std::string ver;
         auto at = item.find('@');
         if (at != std::string::npos) {
-            name = item.substr(0, at);
+            fullName = item.substr(0, at);
             ver = item.substr(at + 1);
         }
+
+        std::string domain, name;
+        registry::RegistryClient::splitName(fullName, domain, name);
+
+        // 选索引
+        const registry::Index* useIdx = &mainIdx;
+        if (!domain.empty()) {
+            auto di = client.fetchDomainIndex(domain);
+            if (!di) {
+                return di.error();
+            }
+            useIdx = *di;
+        }
+
         if (ver.empty()) {
-            ver = idx.findLatestVersion(name);
+            ver = useIdx->findLatestVersion(name);
         }
         if (ver.empty()) {
             return Error(ErrorCode::NotFound,
-                         "索引里找不到包: " + name);
+                         "索引里找不到包: " + fullName);
         }
 
-        auto* pv = idx.find(name, ver);
+        auto* pv = useIdx->find(name, ver);
         if (!pv) {
             return Error(ErrorCode::NotFound,
-                         "索引里找不到包: " + name + "@" + ver);
+                         "索引里找不到包: " + fullName + "@" + ver);
         }
 
-        needed.push_back({name, ver});
+        needed.push_back({fullName, ver});
 
+        // 递归依赖
         for (const auto& [key, type] : pv->requirements) {
-            if (idx.packages.count(type)) {
+            if (type.empty()) continue;
+            if (type.find('/') != std::string::npos) {
+                // 域包
+                queue.push(type);
+            } else if (mainIdx.packages.count(type)) {
+                // 主仓库包
                 queue.push(type);
             }
+            // 其他：引脚能力，忽略
         }
     }
 
@@ -174,33 +237,37 @@ int SyncCmd::run(CmdContext& ctx) {
     // 3. 确保依赖包在本地
     Output::step("确保依赖包在本地");
 
+    registry::RegistryClient* clientPtr = nullptr;
+    std::optional<registry::RegistryClient> clientHolder;
+
     if (!offline_) {
         registry::RegistryConfig cfg = registry::RegistryConfig::load();
         if (skipSignature_) cfg.skipSignature = true;
         cfg.cacheDir = ctx.cacheDir();
+        clientHolder.emplace(cfg);
+        clientPtr = &*clientHolder;
 
-        registry::RegistryClient client(cfg);
-
-        // 3a. 拉索引
-        std::optional<registry::Index> idx;
-
+        // 3a. 拉主索引
+        std::optional<registry::Index> mainIdx;
         {
             auto idxBar = util::ProgressBar("index.json", 0);
-            auto idxResult = client.fetchIndex([&](uint64_t downloaded, uint64_t total) {
-                idxBar.update(downloaded, total);
-            });
+            auto idxResult = clientPtr->fetchIndex(
+                [&](uint64_t downloaded, uint64_t total) {
+                    idxBar.update(downloaded, total);
+                });
             if (!idxResult) {
                 idxBar.fail();
                 Output::error(idxResult.error().message());
                 return 1;
             }
             idxBar.done();
-            idx = std::move(*idxResult);
-            Output::detail("索引已加载（" + std::to_string(idx->packages.size()) + " 个包）");
+            mainIdx = std::move(*idxResult);
+            Output::detail("索引已加载（" + std::to_string(mainIdx->packages.size()) + " 个包，"
+                           + std::to_string(mainIdx->domains.size()) + " 个域）");
         }
 
         // 3b. 展开依赖
-        auto needed = expandDependencies(*idx, proj->mcu, *proj);
+        auto needed = expandDependencies(*clientPtr, *mainIdx, proj->mcu, *proj);
         if (!needed) {
             Output::error(needed.error().message());
             return 1;
@@ -209,8 +276,8 @@ int SyncCmd::run(CmdContext& ctx) {
 
         // 3c. 下载
         for (const auto& pkg : *needed) {
-            auto bar = util::ProgressBar(pkg.name + "@" + pkg.version, 0);
-            auto pkgPath = client.ensurePackage(pkg.name, pkg.version,
+            auto bar = util::ProgressBar(pkg.fullName + "@" + pkg.version, 0);
+            auto pkgPath = clientPtr->ensurePackage(pkg.fullName, pkg.version,
                 [&](uint64_t downloaded, uint64_t total) {
                     bar.update(downloaded, total);
                 });
@@ -223,38 +290,13 @@ int SyncCmd::run(CmdContext& ctx) {
         }
         Output::success("所有依赖包已就绪");
     } else {
-        // 离线模式：只检查芯片包存在
         Output::detail("离线模式，跳过下载");
-
         auto chipPkg = loadChipFromCache(ctx.packagesDir(), proj->mcu);
         if (!chipPkg) {
             Output::error("离线模式，芯片驱动未缓存: " + proj->mcu);
             return 1;
         }
         Output::detail("芯片驱动: " + proj->mcu + " 已缓存");
-
-        // 检查所有设备驱动
-        for (const auto& dev : proj->devices) {
-            if (dev.version.toString() != "0.0.0") {
-                auto pkgDir = ctx.packagesDir() / (dev.driver + "-" + dev.version.toString());
-                if (!fs::exists(pkgDir)) {
-                    Output::error("离线模式，驱动未缓存: " + dev.driver + "@" + dev.version.toString());
-                    return 1;
-                }
-            } else {
-                // 扫目录找
-                bool found = false;
-                for (const auto& entry : fs::directory_iterator(ctx.packagesDir())) {
-                    if (!entry.is_directory()) continue;
-                    auto name = entry.path().filename().string();
-                    if (name.rfind(dev.driver + "-", 0) == 0) { found = true; break; }
-                }
-                if (!found) {
-                    Output::error("离线模式，驱动未缓存: " + dev.driver);
-                    return 1;
-                }
-            }
-        }
         Output::success("所有依赖包已缓存");
     }
 
@@ -319,7 +361,6 @@ int SyncCmd::run(CmdContext& ctx) {
         return 1;
     }
     Output::success("driver/ 已生成");
-
     return 0;
 }
 

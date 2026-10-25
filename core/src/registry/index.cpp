@@ -21,14 +21,11 @@ namespace hpm::registry {
 
 namespace {
 
-// 把 {baseurl} 替换成 baseUrl
 std::string replaceBaseUrl(const std::string& url, const std::string& baseUrl) {
     if (baseUrl.empty()) return url;
-
     const std::string placeholder = "{baseurl}";
     auto pos = url.find(placeholder);
     if (pos == std::string::npos) return url;
-
     std::string result = url;
     result.replace(pos, placeholder.size(), baseUrl);
     return result;
@@ -107,6 +104,24 @@ Result<Index> parseIndex(const std::string& jsonText,
                 di.pub = replaceBaseUrl(dvJson->getString("pub"), baseUrl);
                 di.pubSig = replaceBaseUrl(dvJson->getString("pub_sig"), baseUrl);
                 idx.developers[devName] = std::move(di);
+            }
+        }
+    }
+
+    // domains
+    auto domainsJson = j->get("domains");
+    if (domainsJson && domainsJson->isObject()) {
+        auto domKeys = domainsJson->keys();
+        if (domKeys) {
+            for (const auto& domName : *domKeys) {
+                auto dvJson = domainsJson->get(domName);
+                if (!dvJson || !dvJson->isObject()) continue;
+
+                DomainInfo di;
+                di.index          = replaceBaseUrl(dvJson->getString("index"), baseUrl);
+                di.officialPub    = replaceBaseUrl(dvJson->getString("official_pub"), baseUrl);
+                di.officialPubSig = replaceBaseUrl(dvJson->getString("official_pub_sig"), baseUrl);
+                idx.domains[domName] = std::move(di);
             }
         }
     }

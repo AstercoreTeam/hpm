@@ -19,23 +19,17 @@
 #include <hpm/registry/official_key.h>
 #include <hpm/registry/signature.h>
 #include <hpm/util/process.h>
-#include <hpm/util/progress_bar.h>
 
 #include <curl/curl.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
-#include <iostream>
 #include <sstream>
-#include "hpm/config.h"
 
 namespace hpm::registry {
-
+namespace fs = std::filesystem;
 namespace {
-
-// ─────────────────────────────────────────────
-// HTTP 回调
-// ─────────────────────────────────────────────
 
 size_t writeToString(void* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* out = static_cast<std::string*>(userdata);
@@ -49,10 +43,6 @@ size_t writeToFile(void* ptr, size_t size, size_t nmemb, void* userdata) {
     return size * nmemb;
 }
 
-// ─────────────────────────────────────────────
-// 进度回调
-// ─────────────────────────────────────────────
-
 struct ProgressCtx {
     DownloadProgress progress;
 };
@@ -64,7 +54,6 @@ int progressCallback(void* clientp,
                      curl_off_t /*ulnow*/) {
     auto* ctx = static_cast<ProgressCtx*>(clientp);
     if (!ctx || !ctx->progress) return 0;
-
     if (dltotal > 0) {
         ctx->progress(static_cast<uint64_t>(dlnow),
                       static_cast<uint64_t>(dltotal));
@@ -83,9 +72,10 @@ int progressCallback(void* clientp,
 RegistryConfig RegistryConfig::load() {
     RegistryConfig cfg;
 
-    cfg.registries.push_back(HPM_DEFAULT_REGISTRY_URL);
+    cfg.registries.push_back(
+        "https://raw.githubusercontent.com/xzc842/hpm-repo/main/index.json");
 
-    if (const char* env = std::getenv(HPM_ENV_REGISTRY ); env && *env) {
+    if (const char* env = std::getenv("HPM_REGISTRY"); env && *env) {
         cfg.registries.clear();
         std::string s(env);
         std::istringstream iss(s);
@@ -95,12 +85,12 @@ RegistryConfig RegistryConfig::load() {
         }
     }
 
-    if (const char* env = std::getenv(HPM_ENV_HOME); env && *env) {
+    if (const char* env = std::getenv("HPM_HOME"); env && *env) {
         cfg.cacheDir = std::filesystem::path(env);
     } else if (const char* home = std::getenv("HOME"); home && *home) {
-        cfg.cacheDir = std::filesystem::path(home) / HPM_CACHE_DIR_NAME;
+        cfg.cacheDir = std::filesystem::path(home) / ".hpm";
     } else {
-        cfg.cacheDir = std::filesystem::current_path() / HPM_CACHE_DIR_NAME;
+        cfg.cacheDir = std::filesystem::current_path() / ".hpm";
     }
 
     auto configFile = cfg.cacheDir / "config.json";
@@ -125,7 +115,7 @@ RegistryConfig RegistryConfig::load() {
         }
     }
 
-    if (const char* env = std::getenv(HPM_ENV_SKIP_SIGNATURE); env && *env) {
+    if (const char* env = std::getenv("HPM_SKIP_SIGNATURE"); env && *env) {
         cfg.skipSignature = (std::string(env) == "1");
     }
 
@@ -146,11 +136,28 @@ RegistryClient::~RegistryClient() {
 }
 
 std::filesystem::path RegistryClient::packagesDir() const {
-    return config_.cacheDir / HPM_PACKAGES_DIR_NAME;
+    return config_.cacheDir / "packages";
 }
 
 std::filesystem::path RegistryClient::tarballsDir() const {
-    return config_.cacheDir / HPM_TARBALLS_DIR_NAME;
+    return config_.cacheDir / "cache" / "tarballs";
+}
+
+// ─────────────────────────────────────────────
+// 名称拆分
+// ─────────────────────────────────────────────
+
+void RegistryClient::splitName(const std::string& fullName,
+                                std::string& domain,
+                                std::string& name) {
+    auto slash = fullName.find('/');
+    if (slash == std::string::npos) {
+        domain.clear();
+        name = fullName;
+    } else {
+        domain = fullName.substr(0, slash);
+        name = fullName.substr(slash + 1);
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -171,10 +178,9 @@ Result<std::string> RegistryClient::httpGet(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeToString);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, HPM_HTTP_TIMEOUT);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, HPM_USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hpm/0.1.0");
 
-    // 进度回调
     ProgressCtx ctx{progress};
     if (progress) {
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
@@ -222,10 +228,9 @@ Result<void> RegistryClient::httpDownload(
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeToFile);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &f);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, HPM_HTTP_DOWNLOAD_TIMEOUT);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, HPM_USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hpm/0.1.0");
 
-    // 进度回调
     ProgressCtx ctx{progress};
     if (progress) {
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
@@ -253,13 +258,12 @@ Result<void> RegistryClient::httpDownload(
 }
 
 // ─────────────────────────────────────────────
-// 索引
+// 主索引
 // ─────────────────────────────────────────────
 
 Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
     if (indexLoaded_) return cachedIndex_;
 
-    // 1. 确保官方公钥
     if (!config_.skipSignature) {
         OfficialKeyManager keyMgr(config_.cacheDir);
         auto key = keyMgr.ensure();
@@ -272,23 +276,19 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
 
     std::string lastError;
 
-    // 2. 尝试每个镜像
     for (const auto& url : config_.registries) {
-        // 2a. 下载 index.json
         auto text = httpGet(url, progress);
         if (!text) {
             lastError = text.error().message();
             continue;
         }
 
-        // 2b. 算 baseUrl（索引 URL 的目录）
         std::string baseUrl = url;
         auto slash = baseUrl.find_last_of('/');
         if (slash != std::string::npos) {
             baseUrl = baseUrl.substr(0, slash);
         }
 
-        // 2c. 下载 index.json.sig
         if (!config_.skipSignature) {
             auto sigUrl = url + ".sig";
             auto sigText = httpGet(sigUrl);
@@ -311,7 +311,6 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
                 f << *sigText;
             }
 
-            // 2d. 用官方公钥验证
             auto ok = verifySignature(officialPubKey_, tmpSig, tmpIndex);
             if (!ok) {
                 lastError = "索引签名验证失败: " + ok.error().message();
@@ -323,7 +322,6 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
             }
         }
 
-        // 2e. 解析（传 baseUrl）
         auto idx = parseIndex(*text, baseUrl);
         if (!idx) {
             lastError = idx.error().message();
@@ -340,15 +338,138 @@ Result<Index> RegistryClient::fetchIndex(DownloadProgress progress) {
 }
 
 // ─────────────────────────────────────────────
+// 域索引
+// ─────────────────────────────────────────────
+
+Result<const Index*> RegistryClient::fetchDomainIndex(
+    const std::string& domain,
+    DownloadProgress progress) {
+
+    auto it = domainIndexes_.find(domain);
+    if (it != domainIndexes_.end()) {
+        return &it->second;
+    }
+
+    auto mainIdx = fetchIndex(progress);
+    if (!mainIdx) return mainIdx.error();
+
+    auto dit = mainIdx->domains.find(domain);
+    if (dit == mainIdx->domains.end()) {
+        return Error(ErrorCode::NotFound,
+                     "主索引里找不到域: " + domain);
+    }
+
+    const auto& info = dit->second;
+
+    if (config_.skipSignature) {
+        auto text = httpGet(info.index, progress);
+        if (!text) return text.error();
+
+        std::string baseUrl = info.index;
+        auto slash = baseUrl.find_last_of('/');
+        if (slash != std::string::npos) {
+            baseUrl = baseUrl.substr(0, slash);
+        }
+
+        auto idx = parseIndex(*text, baseUrl);
+        if (!idx) return idx.error();
+
+        domainIndexes_[domain] = std::move(*idx);
+        return &domainIndexes_[domain];
+    }
+
+    // 1. 下载域官方公钥 + 签名
+    auto keyDir = config_.cacheDir / "cache" / "domains" / domain;
+    std::filesystem::create_directories(keyDir);
+
+    auto pubPath = keyDir / "official.pub";
+    auto pubSigPath = keyDir / "official.pub.sig";
+
+    if (!std::filesystem::exists(pubPath)) {
+        auto dl = httpDownload(info.officialPub, pubPath, nullptr);
+        if (!dl) return dl.error();
+    }
+    if (!std::filesystem::exists(pubSigPath)) {
+        auto dl = httpDownload(info.officialPubSig, pubSigPath, nullptr);
+        if (!dl) return dl.error();
+    }
+
+    // 2. 用主仓库官方公钥验证域官方公钥
+    auto ok = verifySignature(officialPubKey_, pubSigPath, pubPath);
+    if (!ok) return ok.error();
+    if (!*ok) {
+        return Error(ErrorCode::ChecksumMismatch,
+                     "域官方公钥签名无效: " + domain);
+    }
+
+    domainPubKeys_[domain] = pubPath;
+
+    // 3. 下载域索引 + 签名
+    auto text = httpGet(info.index, progress);
+    if (!text) return text.error();
+
+    auto sigUrl = info.index + ".sig";
+    auto sigText = httpGet(sigUrl);
+    if (!sigText) {
+        return Error(ErrorCode::NetworkError,
+                     "域索引签名下载失败: " + sigText.error().message());
+    }
+
+    auto tmpDir = config_.cacheDir / "cache" / "tmp";
+    std::filesystem::create_directories(tmpDir);
+    auto tmpIndex = tmpDir / ("domain-" + domain + "-index.json");
+    auto tmpSig = tmpDir / ("domain-" + domain + "-index.json.sig");
+
+    {
+        std::ofstream f(tmpIndex);
+        f << *text;
+    }
+    {
+        std::ofstream f(tmpSig);
+        f << *sigText;
+    }
+
+    // 4. 用域官方公钥验证域索引
+    ok = verifySignature(pubPath, tmpSig, tmpIndex);
+    if (!ok) return ok.error();
+    if (!*ok) {
+        return Error(ErrorCode::ChecksumMismatch,
+                     "域索引签名无效: " + domain);
+    }
+
+    // 5. 解析域索引
+    std::string baseUrl = info.index;
+    auto slash = baseUrl.find_last_of('/');
+    if (slash != std::string::npos) {
+        baseUrl = baseUrl.substr(0, slash);
+    }
+
+    auto idx = parseIndex(*text, baseUrl);
+    if (!idx) return idx.error();
+
+    domainIndexes_[domain] = std::move(*idx);
+    return &domainIndexes_[domain];
+}
+
+// ─────────────────────────────────────────────
 // 包
 // ─────────────────────────────────────────────
 
 Result<std::filesystem::path> RegistryClient::ensurePackage(
-    const std::string& name,
+    const std::string& fullName,
     const std::string& version,
     DownloadProgress progress) {
 
-    auto pkgDir = packagesDir() / (name + "-" + version);
+    std::string domain;
+    std::string name;
+    splitName(fullName, domain, name);
+
+    // 目录：<packages>/<domain>/<name>-<version>/ 或 <packages>/<name>-<version>/
+    fs::path baseDir = packagesDir();
+    if (!domain.empty()) {
+        baseDir = baseDir / domain;
+    }
+    auto pkgDir = baseDir / (name + "-" + version);
 
     if (std::filesystem::exists(pkgDir)) {
         return pkgDir;
@@ -356,42 +477,63 @@ Result<std::filesystem::path> RegistryClient::ensurePackage(
 
     if (config_.offline) {
         return Error(ErrorCode::NetworkError,
-                     "离线模式，包未缓存: " + name + "@" + version);
+                     "离线模式，包未缓存: " + fullName + "@" + version);
     }
 
-    auto idx = fetchIndex();
-    if (!idx) return idx.error();
+    // 选索引
+    const Index* idx = nullptr;
+    if (domain.empty()) {
+        auto mainIdx = fetchIndex(progress);
+        if (!mainIdx) return mainIdx.error();
+        idx = &*mainIdx;
+    } else {
+        auto domIdx = fetchDomainIndex(domain, progress);
+        if (!domIdx) return domIdx.error();
+        idx = *domIdx;
+    }
 
     auto* info = idx->find(name, version);
     if (!info) {
         return Error(ErrorCode::NotFound,
-                     "索引里找不到包: " + name + "@" + version);
+                     "索引里找不到包: " + fullName + "@" + version);
     }
 
-    auto tarball = tarballsDir() / (name + "-" + version + ".tar.gz");
+    // tarball 缓存目录也用域
+    auto tarDir = tarballsDir();
+    if (!domain.empty()) {
+        tarDir = tarDir / domain;
+    }
+    auto tarball = tarDir / (name + "-" + version + ".tar.gz");
+
     if (!std::filesystem::exists(tarball)) {
         auto dl = httpDownload(info->url, tarball, progress);
         if (!dl) return dl.error();
     }
 
+    // 签名验证
     if (!config_.skipSignature) {
-        auto sigSt = verifyPackageSignature(tarball, info->sigUrl, info->developer);
+        auto sigSt = verifyPackageSignature(tarball, info->sigUrl,
+                                             domain, info->developer);
         if (!sigSt.ok()) {
             std::filesystem::remove(tarball);
             return sigSt.error();
         }
     }
 
+    // SHA256
     if (!info->sha256.empty()) {
         auto actual = sha256File(tarball);
         if (actual != info->sha256) {
             std::filesystem::remove(tarball);
             return Error(ErrorCode::ChecksumMismatch,
-                         "SHA256 不匹配: " + name + "@" + version);
+                         "SHA256 不匹配: " + fullName + "@" + version);
         }
     }
 
-    auto ex = extractTarball(tarball, packagesDir());
+    // 解压到 baseDir（<packages>/ 或 <packages>/<domain>/）
+    std::error_code ec;
+    std::filesystem::create_directories(baseDir, ec);
+    auto ex = extractTarball(tarball, baseDir);
     if (!ex.ok()) return ex.error();
 
     return pkgDir;
@@ -402,23 +544,39 @@ Result<std::filesystem::path> RegistryClient::ensurePackage(
 // ─────────────────────────────────────────────
 
 Result<std::filesystem::path> RegistryClient::fetchAndVerifyDeveloperKey(
+    const std::string& domain,
     const std::string& devName) {
 
-    auto it = developerKeys_.find(devName);
+    std::string key = domain + "/" + devName;
+    auto it = developerKeys_.find(key);
     if (it != developerKeys_.end()) return it->second;
 
-    auto idx = fetchIndex();
-    if (!idx) return idx.error();
+    const Index* idx = nullptr;
+    std::filesystem::path verifyKey;
+
+    if (domain.empty()) {
+        auto mainIdx = fetchIndex();
+        if (!mainIdx) return mainIdx.error();
+        idx = &*mainIdx;
+        verifyKey = officialPubKey_;
+    } else {
+        auto domIdx = fetchDomainIndex(domain);
+        if (!domIdx) return domIdx.error();
+        idx = *domIdx;
+        verifyKey = domainPubKeys_[domain];
+    }
 
     auto dit = idx->developers.find(devName);
     if (dit == idx->developers.end()) {
         return Error(ErrorCode::NotFound,
-                     "索引里找不到开发者: " + devName);
+                     "索引里找不到开发者: " + devName +
+                     (domain.empty() ? "" : "（域 " + domain + "）"));
     }
 
     const auto& info = dit->second;
 
-    auto keyDir = config_.cacheDir / HPM_KEYS_DIR_NAME / devName;
+    auto keyDir = config_.cacheDir / "cache" / "keys" /
+                  (domain.empty() ? "main" : domain) / devName;
     std::filesystem::create_directories(keyDir);
 
     auto pubPath = keyDir / (devName + ".pub");
@@ -433,20 +591,21 @@ Result<std::filesystem::path> RegistryClient::fetchAndVerifyDeveloperKey(
         if (!dl) return dl.error();
     }
 
-    auto ok = verifySignature(officialPubKey_, sigPath, pubPath);
+    auto ok = verifySignature(verifyKey, sigPath, pubPath);
     if (!ok) return ok.error();
     if (!*ok) {
         return Error(ErrorCode::ChecksumMismatch,
                      "开发者公钥签名无效: " + devName);
     }
 
-    developerKeys_[devName] = pubPath;
+    developerKeys_[key] = pubPath;
     return pubPath;
 }
 
 Status RegistryClient::verifyPackageSignature(
     const std::filesystem::path& tarball,
     const std::string& sigUrl,
+    const std::string& domain,
     const std::string& devName) {
 
     if (sigUrl.empty()) {
@@ -461,7 +620,7 @@ Status RegistryClient::verifyPackageSignature(
         if (!dl) return dl.error();
     }
 
-    auto pub = fetchAndVerifyDeveloperKey(devName);
+    auto pub = fetchAndVerifyDeveloperKey(domain, devName);
     if (!pub) return pub.error();
 
     auto ok = verifySignature(*pub, sigPath, tarball);
