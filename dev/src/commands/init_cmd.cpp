@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include "hpm/config.h"
 
 namespace hpm::cli {
 
@@ -225,7 +226,7 @@ std::string makeReadme(const std::string& name, const std::string& type) {
 "\n"
 "```\n"
 + name + "-0.1.0/\n"
-"├── " + (type == "chip" ? "chip.json" : "manifest.json") + "\n"
+"├── " + (type == "chip" ? HPM_FILE_CHIP : HPM_FILE_MANIFEST) + "\n"
 "├── LICENSE\n"
 "├── README.md\n"
 "├── src/\n"
@@ -260,11 +261,11 @@ int InitCmd::run(DevContext& ctx) {
     }
 
     std::error_code ec;
-    fs::create_directories(pkgDir / "src", ec);
-    fs::create_directories(pkgDir / "include", ec);
+    fs::create_directories(pkgDir / HPM_DIR_SRC, ec);
+    fs::create_directories(pkgDir / HPM_DIR_INCLUDE, ec);
 
     if (type_ == "chip") {
-        fs::create_directories(pkgDir / "ld", ec);
+        fs::create_directories(pkgDir / HPM_DIR_LD, ec);
     }
 
     // manifest.json / chip.json
@@ -275,7 +276,7 @@ int InitCmd::run(DevContext& ctx) {
         } else {
             content = makeDriverManifest(name_, version_, license_);
         }
-        fs::path path = pkgDir / (type_ == "chip" ? "chip.json" : "manifest.json");
+        fs::path path = pkgDir / (type_ == "chip" ? HPM_FILE_CHIP : HPM_FILE_MANIFEST);
         auto st = util::writeFileAtomic(path, content);
         if (!st.ok()) { err(st.error().message()); return 1; }
     }
@@ -295,14 +296,14 @@ int InitCmd::run(DevContext& ctx) {
 
     // src / include
     if (type_ == "chip") {
-        util::writeFileAtomic(pkgDir / "src" / (name_ + ".c"), makeChipC(name_));
-        util::writeFileAtomic(pkgDir / "src" / "hpm_pin.c", makeHpmPinC());
-        util::writeFileAtomic(pkgDir / "include" / (name_ + ".h"), makeChipH(name_));
-        util::writeFileAtomic(pkgDir / "include" / "hpm_pin.h", makeHpmPinH());
-        util::writeFileAtomic(pkgDir / "ld" / (name_ + ".ld"), makeLinkerScript(name_));
+        util::writeFileAtomic(pkgDir / HPM_DIR_SRC / (name_ + ".c"), makeChipC(name_));
+        util::writeFileAtomic(pkgDir / HPM_DIR_SRC / "hpm_pin.c", makeHpmPinC());
+        util::writeFileAtomic(pkgDir / HPM_DIR_INCLUDE / (name_ + ".h"), makeChipH(name_));
+        util::writeFileAtomic(pkgDir / HPM_DIR_INCLUDE / "hpm_pin.h", makeHpmPinH());
+        util::writeFileAtomic(pkgDir / HPM_DIR_LD / (name_ + ".ld"), makeLinkerScript(name_));
     } else {
-        util::writeFileAtomic(pkgDir / "src" / (name_ + ".c"), makeDriverC(name_));
-        util::writeFileAtomic(pkgDir / "include" / (name_ + ".h"), makeDriverH(name_));
+        util::writeFileAtomic(pkgDir / HPM_DIR_SRC / (name_ + ".c"), makeDriverC(name_));
+        util::writeFileAtomic(pkgDir / HPM_DIR_INCLUDE / (name_ + ".h"), makeDriverH(name_));
     }
 
     ok("已创建 " + pkgDir.string());

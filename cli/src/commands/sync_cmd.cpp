@@ -35,6 +35,7 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include "hpm/config.h"
 
 namespace hpm::cli {
 
@@ -68,7 +69,7 @@ Result<Chip> loadChipFromCache(const fs::path& packagesDir,
         if (!entry.is_directory()) continue;
         auto n = entry.path().filename().string();
         if (n.rfind(name + "-", 0) != 0) continue;
-        auto chipJson = entry.path() / "chip.json";
+        auto chipJson = entry.path() / HPM_FILE_CHIP;
         if (fs::exists(chipJson)) {
             return manifest::loadChipFile(chipJson);
         }
@@ -86,7 +87,7 @@ DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
         if (!fs::exists(dir)) return;
         for (const auto& entry : fs::directory_iterator(dir)) {
             if (!entry.is_directory()) continue;
-            auto mf = entry.path() / "manifest.json";
+            auto mf = entry.path() / HPM_FILE_MANIFEST;
             if (!fs::exists(mf)) continue;
             auto dm = manifest::loadDriverManifestFile(mf);
             if (dm.ok()) {
@@ -106,8 +107,8 @@ DriverLibrary loadAllDrivers(const fs::path& packagesDir) {
         if (!entry.is_directory()) continue;
 
         // 如果 entry 里直接有 manifest.json 或 chip.json，是主仓库包，跳过
-        if (fs::exists(entry.path() / "manifest.json") ||
-            fs::exists(entry.path() / "chip.json")) {
+        if (fs::exists(entry.path() / HPM_FILE_MANIFEST) ||
+            fs::exists(entry.path() / HPM_FILE_CHIP)) {
             continue;
         }
 

@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include "hpm/config.h"
 
 namespace hpm::registry {
 namespace fs = std::filesystem;
@@ -72,10 +73,9 @@ int progressCallback(void* clientp,
 RegistryConfig RegistryConfig::load() {
     RegistryConfig cfg;
 
-    cfg.registries.push_back(
-        "https://raw.githubusercontent.com/xzc842/hpm-repo/main/index.json");
+    cfg.registries.push_back(HPM_DEFAULT_REGISTRY_URL);
 
-    if (const char* env = std::getenv("HPM_REGISTRY"); env && *env) {
+    if (const char* env = std::getenv(HPM_ENV_REGISTRY); env && *env) {
         cfg.registries.clear();
         std::string s(env);
         std::istringstream iss(s);
@@ -85,7 +85,7 @@ RegistryConfig RegistryConfig::load() {
         }
     }
 
-    if (const char* env = std::getenv("HPM_HOME"); env && *env) {
+    if (const char* env = std::getenv(HPM_ENV_HOME); env && *env) {
         cfg.cacheDir = std::filesystem::path(env);
     } else if (const char* home = std::getenv("HOME"); home && *home) {
         cfg.cacheDir = std::filesystem::path(home) / ".hpm";
@@ -115,7 +115,7 @@ RegistryConfig RegistryConfig::load() {
         }
     }
 
-    if (const char* env = std::getenv("HPM_SKIP_SIGNATURE"); env && *env) {
+    if (const char* env = std::getenv(HPM_ENV_SKIP_SIGNATURE); env && *env) {
         cfg.skipSignature = (std::string(env) == "1");
     }
 
@@ -382,7 +382,7 @@ Result<const Index*> RegistryClient::fetchDomainIndex(
     auto keyDir = config_.cacheDir / "cache" / "domains" / domain;
     std::filesystem::create_directories(keyDir);
 
-    auto pubPath = keyDir / "official.pub";
+    auto pubPath = keyDir / HPM_FILE_OFFICIAL_PUB;
     auto pubSigPath = keyDir / "official.pub.sig";
 
     if (!std::filesystem::exists(pubPath)) {

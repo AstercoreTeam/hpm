@@ -25,6 +25,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include "hpm/config.h"
 
 namespace hpm::cli {
 
@@ -122,8 +123,8 @@ int PublishCmd::run(DevContext& ctx) {
     std::string name;
     std::string version;
 
-    auto manifestPath = pkgDir / "manifest.json";
-    auto chipPath = pkgDir / "chip.json";
+    auto manifestPath = pkgDir / HPM_FILE_MANIFEST;
+    auto chipPath = pkgDir / HPM_FILE_CHIP;
 
     if (fs::exists(manifestPath)) {
         auto dm = hpm::manifest::loadDriverManifestFile(manifestPath);

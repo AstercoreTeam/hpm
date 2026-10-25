@@ -23,6 +23,7 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include "hpm/config.h"
 
 namespace hpm {
 
@@ -123,7 +124,7 @@ fs::path Generator::findChipPackageDir() const {
         if (!entry.is_directory()) continue;
         auto n = entry.path().filename().string();
         if (n.rfind(name + "-", 0) != 0) continue;
-        if (fs::exists(entry.path() / "chip.json")) return entry.path();
+        if (fs::exists(entry.path() / HPM_FILE_CHIP)) return entry.path();
     }
     return {};
 }
@@ -179,7 +180,7 @@ void Generator::planDriverHeader(GenerationPlan& plan) {
 
     out << "#ifdef __cplusplus\n}\n#endif\n";
 
-    plan.addFile("driver.h", out.str());
+    plan.addFile(HPM_FILE_DRIVER_H, out.str());
 }
 
 // ─────────────────────────────────────────────
@@ -208,7 +209,7 @@ void Generator::planDriverSource(GenerationPlan& plan) {
 
     out << "}\n";
 
-    plan.addFile("driver.c", out.str());
+    plan.addFile(HPM_FILE_DRIVER_C, out.str());
 }
 
 // ─────────────────────────────────────────────
@@ -386,7 +387,7 @@ Status Generator::copyPackageSources(GenerationPlan& plan,
                      "驱动包未找到: " + pkgDir.string());
     }
 
-    for (const char* sub : {"src", "include", "ld"}) {
+    for (const char* sub : {HPM_DIR_SRC, HPM_DIR_INCLUDE, HPM_DIR_LD}) {
         auto dir = pkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -420,7 +421,7 @@ Status Generator::planChipDriver(GenerationPlan& plan) {
 
     fs::path chipTargetDir = chip_.name;
 
-    for (const char* sub : {"src", "include", "ld"}) {
+    for (const char* sub : {HPM_DIR_SRC, HPM_DIR_INCLUDE, HPM_DIR_LD}) {
         auto dir = chipPkgDir / sub;
         if (!fs::exists(dir)) continue;
 
@@ -448,8 +449,8 @@ std::vector<std::string> Generator::collectSources(const GenerationPlan& plan) c
     std::vector<std::string> srcs;
     std::set<std::string> seen;
 
-    srcs.push_back("driver.c");
-    seen.insert("driver.c");
+    srcs.push_back(HPM_FILE_DRIVER_C);
+    seen.insert(HPM_FILE_DRIVER_C);
 
     for (const auto& f : plan.files) {
         if (f.relativePath.extension() != ".c") continue;
