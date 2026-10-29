@@ -95,3 +95,11 @@
 // ── 工具链平台标识 ──
 // 这些在运行时由 ToolchainManager::platform() 返回
 // linux-x64 / darwin-x64 / win32-x64
+
+// HPM 开发者中心
+#define HPM_DEV_CENTER_URL        "https://hpm.astercore.dpdns.org"
+#define HPM_DEV_CENTER_APP_ID     "1bdcb2b136d43431"
+#define HPM_DEV_CENTER_APP_KEY    "2942c1a1b37c104914f4dd8f96a399bf"
+#define HPM_DEV_CENTER_API        "https://hpm.astercore.dpdns.org/api/webhooks/apps"
+#define HPM_DEV_CENTER_TOKEN_API  "https://hpm.astercore.dpdns.org/api/public/oauth/token"
+#define HPM_DEV_CENTER_OAUTH_URL  "https://hpm.astercore.dpdns.org/oauth/authorize"

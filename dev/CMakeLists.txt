@@ -11,21 +11,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+find_package(libzip REQUIRED)
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+
 add_executable(hpm-dev
     src/main.cpp
     src/dev_context.cpp
+    src/dev_config.cpp
     src/commands/init_cmd.cpp
     src/commands/validate_cmd.cpp
     src/commands/publish_cmd.cpp
+    src/commands/login_cmd.cpp
+    src/commands/sync_cmd.cpp
 )
 
 target_link_libraries(hpm-dev
     PRIVATE
         hpm_core
         CLI11::CLI11
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        libzip::zip
+        Threads::Threads
 )
 
 target_include_directories(hpm-dev
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/httplib
 )

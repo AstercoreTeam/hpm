@@ -16,6 +16,8 @@
 #include "commands/init_cmd.h"
 #include "commands/publish_cmd.h"
 #include "commands/validate_cmd.h"
+#include "commands/login_cmd.h"
+#include "commands/sync_cmd.h"
 
 #include <CLI/CLI.hpp>
 #include <hpm/hpm.h>
@@ -42,6 +44,16 @@ int main(int argc, char** argv) {
     auto* publishSub = app.add_subcommand("publish", "打包 + 签名");
     publishCmd.setup(*publishSub);
 
+    //CLI Login
+    hpm::cli::LoginCmd loginCmd;
+    auto* loginSub = app.add_subcommand("login", "登录 HPM 开发者中心");
+    loginCmd.setup(*loginSub);
+
+    //CLI Sync
+    hpm::cli::SyncCmd devSyncCmd;
+    auto* syncSub = app.add_subcommand("sync", "更新索引（zip 手动上传）");
+    devSyncCmd.setup(*syncSub);
+
     CLI11_PARSE(app, argc, argv);
 
     hpm::cli::DevContext ctx;
@@ -55,6 +67,12 @@ int main(int argc, char** argv) {
     }
     if (*publishSub) {
         return publishCmd.run(ctx);
+    }
+    if (*loginSub){
+        return loginCmd.run(ctx);
+    } 
+    if (*syncSub){
+        return devSyncCmd.run(ctx);
     }
 
     std::cout << app.help() << std::endl;
