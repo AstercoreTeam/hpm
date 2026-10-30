@@ -24,12 +24,12 @@
 // ── 官方公钥 ──
 // 官方公钥地址
 #define HPM_OFFICIAL_PUB_URL \
-    "https://raw.githubusercontent.com/xzc842/hpm-repo/main/official.pub"
+    "https://raw.githubusercontent.com/AstercoreTeam/hpm-repo/main/official.pub"
 
 // ── 默认 Registry ──
 // 默认索引地址
 #define HPM_DEFAULT_REGISTRY_URL \
-    "https://raw.githubusercontent.com/xzc842/hpm-repo/main/index.json"
+    "https://raw.githubusercontent.com/AstercoreTeam/hpm-repo/main/index.json"
 
 // ── 环境变量名 ──
 #define HPM_ENV_REGISTRY          "HPM_REGISTRY"
