@@ -17,7 +17,7 @@
 #include "commands/publish_cmd.h"
 #include "commands/validate_cmd.h"
 #include "commands/login_cmd.h"
-#include "commands/sync_cmd.h"
+#include "commands/creat_cmd.h"
 
 #include <CLI/CLI.hpp>
 #include <hpm/hpm.h>
@@ -31,8 +31,12 @@ int main(int argc, char** argv) {
 
     // init
     hpm::cli::InitCmd initCmd;
-    auto* initSub = app.add_subcommand("init", "生成驱动包骨架");
+    auto* initSub = app.add_subcommand("init", "建立驱动仓库");
     initCmd.setup(*initSub);
+    // creat
+    hpm::cli::CreateCmd CreateCmd;
+    auto* CreateSub = app.add_subcommand("create", "生成驱动包骨架");
+    CreateCmd.setup(*CreateSub);
 
     // validate
     std::string path;
@@ -49,10 +53,6 @@ int main(int argc, char** argv) {
     auto* loginSub = app.add_subcommand("login", "登录 HPM 开发者中心");
     loginCmd.setup(*loginSub);
 
-    //CLI Sync
-    hpm::cli::SyncCmd devSyncCmd;
-    auto* syncSub = app.add_subcommand("sync", "更新索引（zip 手动上传）");
-    devSyncCmd.setup(*syncSub);
 
     CLI11_PARSE(app, argc, argv);
 
@@ -61,6 +61,9 @@ int main(int argc, char** argv) {
 
     if (*initSub) {
         return initCmd.run(ctx);
+    }
+    if (*CreateSub) {
+        return CreateCmd.run(ctx);
     }
     if (*validateCmd) {
         return hpm::cli::runValidate(ctx);
@@ -71,9 +74,6 @@ int main(int argc, char** argv) {
     if (*loginSub){
         return loginCmd.run(ctx);
     } 
-    if (*syncSub){
-        return devSyncCmd.run(ctx);
-    }
 
     std::cout << app.help() << std::endl;
     return 0;

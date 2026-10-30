@@ -1,19 +1,7 @@
-// Copyright 2026 XueZicheng <xuezicheng842@outlook.com>
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // dev/src/commands/publish_cmd.cpp
 #include "publish_cmd.h"
+
+#include "../dev_config.h"
 
 #include <hpm/json/json_io.h>
 #include <hpm/manifest/chip_loader.h>
@@ -25,7 +13,8 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
-#include "hpm/config.h"
+#include <string>
+#include <vector>
 
 namespace hpm::cli {
 
@@ -36,12 +25,16 @@ namespace {
 void ok(const std::string& msg) {
     std::cout << "\033[32mok\033[0m " << msg << "\n";
 }
-
 void err(const std::string& msg) {
     std::cerr << "\033[31merror\033[0m " << msg << "\n";
 }
+void info(const std::string& msg) {
+    std::cout << "\033[34minfo\033[0m " << msg << "\n";
+}
+void detail(const std::string& msg) {
+    std::cout << "    " << msg << "\n";
+}
 
-// 读文件全部内容
 std::string readAll(const fs::path& path) {
     std::ifstream f(path);
     if (!f) return "";
@@ -50,9 +43,7 @@ std::string readAll(const fs::path& path) {
     return ss.str();
 }
 
-// 检测私钥算法
 std::string detectAlgorithm(const std::string& keyPath) {
-    // 方法 1：看文件头
     std::string content = readAll(keyPath);
 
     if (content.find("BEGIN ED25519 PRIVATE KEY") != std::string::npos) {
@@ -65,38 +56,54 @@ std::string detectAlgorithm(const std::string& keyPath) {
         return "rsa";
     }
 
-    // PKCS#8 格式（BEGIN PRIVATE KEY），需要 openssl 检测
     if (content.find("BEGIN PRIVATE KEY") != std::string::npos) {
-        auto result = hpm::util::runProcess("openssl",
-            {"pkey", "-in", keyPath, "-noout", "-text"}, true);
-        // verbose=true 时输出到 stderr，拿不到
-        // 改用临时文件
+        auto tmp = fs::temp_directory_path() / "hpm_keytype.txt";
+        std::string cmd = "openssl pkey -in \"" + keyPath +
+                          "\" -noout -text > \"" + tmp.string() + "\" 2>&1";
+        std::system(cmd.c_str());
+        std::string out = readAll(tmp);
+        fs::remove(tmp);
+
+        if (out.find("ED25519") != std::string::npos) return "ed25519";
+        if (out.find("ED448") != std::string::npos) return "ed448";
+        if (out.find("ASN1 OID: prime256v1") != std::string::npos) return "ec";
+        if (out.find("ASN1 OID: secp384r1") != std::string::npos) return "ec";
+        if (out.find("ASN1 OID: secp521r1") != std::string::npos) return "ec";
+        if (out.find("Modulus") != std::string::npos) return "rsa";
+        if (out.find("RSA") != std::string::npos) return "rsa";
     }
 
     return "";
 }
 
-// 用 openssl 检测 PKCS#8 私钥的算法
-std::string detectAlgorithmViaOpenssl(const std::string& keyPath) {
-    // 临时文件捕获输出
-    auto tmp = fs::temp_directory_path() / "hpm_keytype.txt";
+// 在指定目录下运行 git 命令（用 -C，避免依赖 runProcess 的 cwd 支持）
+auto runGit(const fs::path& cwd, const std::vector<std::string>& args,
+            bool verbose = false) {
+    std::vector<std::string> full;
+    full.reserve(args.size() + 2);
+    full.push_back("-C");
+    full.push_back(cwd.string());
+    full.insert(full.end(), args.begin(), args.end());
+    return hpm::util::runProcess("git", full, verbose);
+}
 
-    std::string cmd = "openssl pkey -in \"" + keyPath +
-                      "\" -noout -text > \"" + tmp.string() + "\" 2>&1";
-    std::system(cmd.c_str());
-
-    std::string content = readAll(tmp);
-    fs::remove(tmp);
-
-    if (content.find("ED25519") != std::string::npos) return "ed25519";
-    if (content.find("ED448") != std::string::npos) return "ed448";
-    if (content.find("ASN1 OID: prime256v1") != std::string::npos) return "ec";
-    if (content.find("ASN1 OID: secp384r1") != std::string::npos) return "ec";
-    if (content.find("ASN1 OID: secp521r1") != std::string::npos) return "ec";
-    if (content.find("Modulus") != std::string::npos) return "rsa";
-    if (content.find("RSA") != std::string::npos) return "rsa";
-
-    return "";
+// 从 manifest / chip 中读取 license，读不到返回默认值
+std::string readLicense(const fs::path& manifestPath,
+                        const fs::path& chipPath,
+                        const std::string& fallback = "MIT") {
+    fs::path p = fs::exists(manifestPath) ? manifestPath : chipPath;
+    if (!fs::exists(p)) return fallback;
+    auto j = json::parseFile(p);
+    if (!j) return fallback;
+    auto lic = j->get("license");
+    if (lic) {
+        auto s = lic->asString();     // hpm::Result<std::string>
+        if (s.ok()) {
+            std::string v = s.value();
+            if (!v.empty()) return v;
+        }
+    }
+    return fallback;
 }
 
 } // namespace
@@ -119,12 +126,13 @@ int PublishCmd::run(DevContext& ctx) {
         return 1;
     }
 
-    // 1. 读 manifest.json 或 chip.json
+    // 1. 读 manifest / chip
     std::string name;
     std::string version;
 
-    auto manifestPath = pkgDir / HPM_FILE_MANIFEST;
-    auto chipPath = pkgDir / HPM_FILE_CHIP;
+    auto manifestPath = pkgDir / "manifest.json";
+    auto chipPath = pkgDir / "chip.json";
+    const bool isChip = fs::exists(chipPath) && !fs::exists(manifestPath);
 
     if (fs::exists(manifestPath)) {
         auto dm = hpm::manifest::loadDriverManifestFile(manifestPath);
@@ -155,18 +163,7 @@ int PublishCmd::run(DevContext& ctx) {
 
     ok("包: " + name + "@" + version);
 
-    // 2. 检查私钥
-    if (!fs::exists(keyPath_)) {
-        err("私钥不存在: " + keyPath_);
-        return 1;
-    }
-
-    // 3. 创建输出目录
-    fs::path out = outDir_.empty() ? fs::path("publish") : fs::path(outDir_);
-    std::error_code ec;
-    fs::create_directories(out, ec);
-
-    // 4. 检查包目录名
+    // 2. 检查包目录名
     auto expectedDirName = name + "-" + version;
     if (pkgDir.filename().string() != expectedDirName) {
         err("包目录名必须是 " + expectedDirName +
@@ -174,8 +171,27 @@ int PublishCmd::run(DevContext& ctx) {
         return 1;
     }
 
-    // 5. 打包 tar.gz
-    auto tarPath = out / (name + "-" + version + ".tar.gz");
+    // 3. 检查私钥
+    if (!fs::exists(keyPath_)) {
+        err("私钥不存在: " + keyPath_);
+        return 1;
+    }
+
+    // 4. 输出根目录 = publish/
+    fs::path out = outDir_.empty() ? fs::path("publish") : fs::path(outDir_);
+    std::error_code ec;
+    fs::create_directories(out, ec);
+    if (ec) {
+        err("创建输出目录失败: " + ec.message());
+        return 1;
+    }
+
+    // 5. 打包 tar.gz（先放临时位置，稍后拷到 publish/<dev>/）
+    auto tarName = name + "-" + version + ".tar.gz";
+    auto sigName = name + "-" + version + ".tar.gz.sig";
+    auto tarPath = out / tarName;
+    auto sigPath = out / sigName;
+
     auto st = hpm::util::runProcess("tar",
         {"-czf", tarPath.string(),
          "-C", pkgDir.parent_path().string(),
@@ -192,54 +208,237 @@ int PublishCmd::run(DevContext& ctx) {
     if (alg == "auto") {
         alg = detectAlgorithm(keyPath_);
         if (alg.empty()) {
-            alg = detectAlgorithmViaOpenssl(keyPath_);
-        }
-        if (alg.empty()) {
             err("无法自动检测私钥算法，请用 --algorithm 指定");
-            err("可用：rsa / ec / ed25519");
             return 1;
         }
     }
     ok("算法: " + alg);
 
-    // 7. 签名
-    auto sigPath = out / (name + "-" + version + ".tar.gz.sig");
-
+    // 7. 签名 tar.gz
     if (alg == "ed25519" || alg == "ed448") {
         st = hpm::util::runProcess("openssl",
             {"pkeyutl", "-sign", "-inkey", keyPath_,
              "-rawin", "-in", tarPath.string(), "-out", sigPath.string()},
             false);
     } else {
-        // RSA / EC：SHA-256
         st = hpm::util::runProcess("openssl",
             {"dgst", "-sha256", "-sign", keyPath_,
              "-out", sigPath.string(), tarPath.string()},
             false);
     }
-
     if (!st.ok()) {
         err("签名失败: " + st.error().message());
         return 1;
     }
     ok("签名: " + sigPath.string());
 
-    // 8. 计算 SHA256
+    // 8. 包信息
     auto sha = hpm::registry::sha256File(tarPath);
     auto size = fs::file_size(tarPath);
+    std::string license = readLicense(manifestPath, chipPath, "MIT");
 
     std::cout << "\n";
-    std::cout << "包信息（用于 index.json）：\n";
+    std::cout << "包信息：\n";
     std::cout << "  name:      " << name << "\n";
     std::cout << "  version:   " << version << "\n";
     std::cout << "  algorithm: " << alg << "\n";
+    std::cout << "  license:   " << license << "\n";
     std::cout << "  sha256:    " << sha << "\n";
-    std::cout << "  size:      " << size << "\n";
-    std::cout << "\n";
-    std::cout << "下一步：\n";
-    std::cout << "  1. 把 " << tarPath.filename().string() << " 和 .sig 上传到仓库\n";
-    std::cout << "  2. 在 index.json 里加包信息\n";
-    std::cout << "  3. 重新签 index.json\n";
+    std::cout << "  size:      " << size << "\n\n";
+
+    // 9. 读 dev.json
+    auto cfg = loadDevConfig();
+    if (!cfg) {
+        info("未登录，跳过索引更新");
+        info("登录后运行 hpm-dev login，然后重新 publish");
+        info("手动上传:");
+        detail(tarPath.string());
+        detail(sigPath.string());
+        return 0;
+    }
+
+    // 10. publish/ 必须是 git 仓库，否则只打包签名
+    fs::path repoRoot = out;                 // publish 即仓库根
+    fs::path gitDir = repoRoot / ".git";
+    if (!fs::exists(gitDir)) {
+        err("publish 目录不是 git 仓库: " + repoRoot.string());
+        info("请先运行 hpm-dev init 初始化仓库");
+        info("手动上传:");
+        detail(tarPath.string());
+        detail(sigPath.string());
+        return 0;
+    }
+
+    // 11. git pull（在 publish/ 里）
+    info("拉取远程仓库...");
+    st = runGit(repoRoot, {"pull", "origin", "main"}, false);
+    if (!st.ok()) {
+        err("git pull 失败: " + st.error().message());
+        info("请手动处理冲突后重新运行 hpm-dev publish");
+        return 1;
+    }
+
+    // 12. 拷产物到 publish/<developer>/
+    fs::path devDir = repoRoot / cfg->developer;
+    fs::create_directories(devDir, ec);
+    if (ec) {
+        err("创建开发者目录失败: " + ec.message());
+        return 1;
+    }
+    fs::path devTar = devDir / tarName;
+    fs::path devSig = devDir / sigName;
+    fs::copy_file(tarPath, devTar, fs::copy_options::overwrite_existing, ec);
+    if (ec) { err("拷贝 tar.gz 失败: " + ec.message()); return 1; }
+    fs::copy_file(sigPath, devSig, fs::copy_options::overwrite_existing, ec);
+    if (ec) { err("拷贝 sig 失败: " + ec.message()); return 1; }
+    ok("已放置产物: " + devDir.string());
+
+    // 13. 更新 publish/index.json
+    info("更新 index.json...");
+    fs::path indexPath = repoRoot / "index.json";
+    {
+        json::Value index;
+        if (fs::exists(indexPath)) {
+            auto j = json::parseFile(indexPath);
+            if (j) index = *j;
+        } else {
+            index = json::Value::object();
+            index.set("schema", json::Value(int64_t(1)));
+            index.set("official_pub", json::Value("{baseurl}/official.pub"));
+            index.set("developers", json::Value::object());
+            index.set("domains", json::Value::object());
+            index.set("packages", json::Value::object());
+        }
+
+        // 开发者
+        auto devs = index.get("developers");
+        if (!devs || !devs->isObject()) {
+            index.set("developers", json::Value::object());
+            devs = index.get("developers");
+        }
+        if (!devs->has(cfg->developer)) {
+            auto devObj = json::Value::object();
+            devObj.set("pub", json::Value("{baseurl}/" + cfg->developer + "/" +
+                                          cfg->developer + ".pub"));
+            devObj.set("pub_sig", json::Value("{baseurl}/" + cfg->developer + "/" +
+                                              cfg->developer + ".pub.sig"));
+            devs->set(cfg->developer, devObj);
+        }
+
+        // 包
+        auto packages = index.get("packages");
+        if (!packages || !packages->isObject()) {
+            index.set("packages", json::Value::object());
+            packages = index.get("packages");
+        }
+        json::Value pkgInfo;
+        if (packages->has(name)) {
+            pkgInfo = *packages->get(name);
+        } else {
+            pkgInfo = json::Value::object();
+            pkgInfo.set("versions", json::Value::object());
+        }
+        auto versions = pkgInfo.get("versions");
+        if (!versions || !versions->isObject()) {
+            pkgInfo.set("versions", json::Value::object());
+            versions = pkgInfo.get("versions");
+        }
+
+        // requires（JSON key 用 "requires"）
+        json::Value requires_ = json::Value::object();
+        if (fs::exists(manifestPath)) {
+            auto mj = json::parseFile(manifestPath);
+            if (mj && mj->has("requires")) {
+                auto reqs = mj->get("requires");
+                if (reqs) requires_ = *reqs;
+            }
+        }
+
+        auto verObj = json::Value::object();
+        verObj.set("kind", json::Value(isChip ? "chip" : "driver"));
+        verObj.set("developer", json::Value(cfg->developer));
+        verObj.set("url", json::Value("{baseurl}/" + cfg->developer + "/" +
+                                      name + "-" + version + ".tar.gz"));
+        verObj.set("sig_url", json::Value("{baseurl}/" + cfg->developer + "/" +
+                                          name + "-" + version + ".tar.gz.sig"));
+        verObj.set("sha256", json::Value(sha));
+        verObj.set("size", json::Value(static_cast<int64_t>(size)));
+        verObj.set("license", json::Value(license));
+        verObj.set("requires", requires_);      // 统一为 "requires"
+
+        versions->set(version, verObj);
+        pkgInfo.set("versions", *versions);
+        packages->set(name, pkgInfo);
+        index.set("packages", *packages);
+
+        auto writeSt = json::writeFile(index, indexPath);
+        if (!writeSt.ok()) {
+            err("写 index.json 失败: " + writeSt.error().message());
+            return 1;
+        }
+        ok("已更新 index.json");
+    }
+
+    // 14. 签名 index.json
+    info("签名 index.json...");
+    fs::path indexSigPath = repoRoot / "index.json.sig";
+    if (alg == "ed25519" || alg == "ed448") {
+        st = hpm::util::runProcess("openssl",
+            {"pkeyutl", "-sign", "-inkey", keyPath_,
+             "-rawin", "-in", indexPath.string(), "-out", indexSigPath.string()},
+            false);
+    } else {
+        st = hpm::util::runProcess("openssl",
+            {"dgst", "-sha256", "-sign", keyPath_,
+             "-out", indexSigPath.string(), indexPath.string()},
+            false);
+    }
+    if (!st.ok()) {
+        err("签名 index.json 失败: " + st.error().message());
+        return 1;
+    }
+    ok("已签名 " + indexSigPath.string());
+
+    // 15. 在 publish/ 里 git add / commit
+    info("提交...");
+    st = runGit(repoRoot,
+        {"add",
+         (fs::path(cfg->developer) / tarName).string(),
+         (fs::path(cfg->developer) / sigName).string(),
+         "index.json", "index.json.sig"},
+        false);
+    if (!st.ok()) {
+        err("git add 失败: " + st.error().message());
+        return 1;
+    }
+
+    st = runGit(repoRoot, {"commit", "-m", "Update " + name + "@" + version}, false);
+    if (!st.ok()) {
+        info("没有变更需要提交，跳过");
+    } else {
+        ok("已提交 " + name + "@" + version);
+    }
+
+    // 16. 有远程才 push
+    auto remote = runGit(repoRoot, {"remote"}, false);
+    bool hasRemote = false;
+    // runProcess 的 Status 不直接给输出；用 get-url 判定更可靠
+    auto originUrl = runGit(repoRoot, {"remote", "get-url", "origin"}, false);
+    hasRemote = originUrl.ok();
+
+    if (hasRemote) {
+        info("推送...");
+        st = runGit(repoRoot, {"push", "origin", "main"}, false);
+        if (!st.ok()) {
+            err("git push 失败: " + st.error().message());
+            info("请手动运行: git -C publish push origin main");
+            return 1;
+        }
+        ok("已推送 " + name + "@" + version);
+    } else {
+        info("未设置远程仓库，跳过推送");
+        info("设置远程后可运行: git -C publish push origin main");
+    }
 
     return 0;
 }
