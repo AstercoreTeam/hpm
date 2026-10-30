@@ -1,8 +1,24 @@
+// Copyright 2026 XueZicheng <xuezicheng842@outlook.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // dev/src/commands/publish_cmd.cpp
 #include "publish_cmd.h"
 
 #include "../dev_config.h"
+#include "../http.h"
 
+#include <hpm/config.h>
 #include <hpm/json/json_io.h>
 #include <hpm/manifest/chip_loader.h>
 #include <hpm/manifest/driver_loader.h>
@@ -186,7 +202,7 @@ int PublishCmd::run(DevContext& ctx) {
         return 1;
     }
 
-    // 5. 打包 tar.gz（先放临时位置，稍后拷到 publish/<dev>/）
+    // 5. 打包 tar.gz（先放 publish/ 根，稍后拷到 publish/<dev>/）
     auto tarName = name + "-" + version + ".tar.gz";
     auto sigName = name + "-" + version + ".tar.gz.sig";
     auto tarPath = out / tarName;
@@ -420,11 +436,8 @@ int PublishCmd::run(DevContext& ctx) {
     }
 
     // 16. 有远程才 push
-    auto remote = runGit(repoRoot, {"remote"}, false);
-    bool hasRemote = false;
-    // runProcess 的 Status 不直接给输出；用 get-url 判定更可靠
     auto originUrl = runGit(repoRoot, {"remote", "get-url", "origin"}, false);
-    hasRemote = originUrl.ok();
+    bool hasRemote = originUrl.ok();
 
     if (hasRemote) {
         info("推送...");
@@ -435,9 +448,60 @@ int PublishCmd::run(DevContext& ctx) {
             return 1;
         }
         ok("已推送 " + name + "@" + version);
+
+        // 17. 同步到 HPM 开发者中心账户
+        info("同步到开发者中心...");
+        {
+            std::string requiresJsonStr = "{}";
+            if (fs::exists(manifestPath)) {
+                auto mj = json::parseFile(manifestPath);
+                if (mj && mj->has("requires")) {
+                    auto reqs = mj->get("requires");
+                    if (reqs) requiresJsonStr = json::dump(*reqs, -1);
+                }
+            }
+
+            auto payload = json::Value::object();
+            payload.set("name", json::Value(name));
+            payload.set("kind", json::Value(isChip ? "chip" : "driver"));
+            payload.set("requiresJson", json::Value(requiresJsonStr));
+            payload.set("version", json::Value(version));
+            payload.set("url", json::Value("{baseurl}/" + cfg->developer + "/" + tarName));
+            payload.set("sigUrl", json::Value("{baseurl}/" + cfg->developer + "/" + sigName));
+            payload.set("sha256", json::Value(sha));
+            payload.set("size", json::Value(static_cast<int64_t>(size)));
+            payload.set("license", json::Value(license));
+
+            auto body = json::Value::object();
+            body.set("accessToken", json::Value(cfg->accessToken));
+            body.set("action", json::Value("update_package"));
+            body.set("payload", payload);
+
+            auto resp = hpm::cli::httpPostJson(
+                HPM_DEV_CENTER_API,
+                json::dump(body, -1),
+                "Authorization: Bearer " + std::string(HPM_DEV_CENTER_APP_KEY));
+
+            if (resp.status == 200) {
+                auto rj = json::parse(resp.body);
+                if (rj && rj->getBool("success", false)) {
+                    ok("已同步到开发者中心");
+                } else {
+                    err("同步返回失败: " + resp.body);
+                    info("产物已在 git 仓库，可稍后重试");
+                }
+            } else if (resp.status == 401) {
+                err("accessToken 或 AppKey 失效，请重新运行 hpm-dev login");
+            } else if (resp.status == 403) {
+                err("用户已取消授权或账户被冻结");
+            } else {
+                err("同步失败: HTTP " + std::to_string(resp.status) + " " + resp.body);
+            }
+        }
     } else {
         info("未设置远程仓库，跳过推送");
         info("设置远程后可运行: git -C publish push origin main");
+        info("账户索引未同步，推送后请重新运行 publish");
     }
 
     return 0;
