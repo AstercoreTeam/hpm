@@ -67,6 +67,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cli11)
 
+# toml++
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0
+)
+set(TOMLPLUSPLUS_BUILD_TESTS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(tomlplusplus)
+
 # Catch2（仅测试时）
 option(HPM_BUILD_TESTS "Build tests" ON)
 if(HPM_BUILD_TESTS)
