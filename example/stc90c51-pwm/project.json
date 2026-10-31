@@ -1,0 +1,22 @@
+{
+  "mcu": "stc90c51",
+  "devices": {
+    "app_delay": {
+      "driver": "time",
+      "config": {
+        "timer_id": "1",
+        "osc_hz": "11059200",
+        "clock_mode": "12"
+      }
+    },
+    "servo": {
+      "driver": "pwm",
+      "pin": "P1_0",
+      "config": {
+        "freq_hz": "50",
+        "osc_hz": "11059200",
+        "clock_mode": "12"
+      }
+    }
+  }
+}
