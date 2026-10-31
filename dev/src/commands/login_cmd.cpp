@@ -16,6 +16,7 @@
 #include "login_cmd.h"
 
 #include "../dev_config.h"
+#include "../http.h"
 
 #include <hpm/config.h>
 #include <hpm/json/json_io.h>
@@ -62,65 +63,6 @@ std::string toIso8601(std::time_t t) {
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
     return std::string(buf);
-}
-
-// 用 httplib::Client 发 POST JSON
-struct HttpResult {
-    int status = 0;
-    std::string body;
-};
-
-HttpResult httpPostJson(const std::string& url,
-                         const std::string& body,
-                         const std::string& authHeader = "") {
-    HttpResult result;
-
-    std::string s = url;
-    bool isHttps = true;
-    if (s.rfind("https://", 0) == 0) {
-        s = s.substr(8);
-    } else if (s.rfind("http://", 0) == 0) {
-        s = s.substr(7);
-        isHttps = false;
-    }
-
-    std::string host;
-    std::string path;
-    auto slash = s.find('/');
-    if (slash == std::string::npos) {
-        host = s;
-        path = "/";
-    } else {
-        host = s.substr(0, slash);
-        path = s.substr(slash);
-    }
-
-    httplib::Client cli(isHttps ? ("https://" + host) : ("http://" + host));
-    cli.set_connection_timeout(30);
-    cli.set_read_timeout(30);
-
-    httplib::Headers headers;
-    headers.emplace("Content-Type", "application/json");
-    if (!authHeader.empty()) {
-        auto colon = authHeader.find(':');
-        if (colon != std::string::npos) {
-            std::string key = authHeader.substr(0, colon);
-            std::string value = authHeader.substr(colon + 1);
-            while (!value.empty() && value.front() == ' ') value.erase(value.begin());
-            headers.emplace(key, value);
-        }
-    }
-
-    auto res = cli.Post(path.c_str(), headers, body, "application/json");
-    if (!res) {
-        result.status = 0;
-        result.body = "HTTP 请求失败: " + httplib::to_string(res.error());
-        return result;
-    }
-
-    result.status = res->status;
-    result.body = res->body;
-    return result;
 }
 
 // 确认 y/n/e
@@ -209,7 +151,7 @@ int LoginCmd::run(DevContext& ctx) {
     tokenBody.set("appKey", json::Value(HPM_DEV_CENTER_APP_KEY));
 
     auto tokenResp = httpPostJson(HPM_DEV_CENTER_TOKEN_API,
-                                   json::dump(tokenBody, -1));
+                                  json::dump(tokenBody, -1));
     if (tokenResp.status != 200) {
         err("获取 token 失败: HTTP " + std::to_string(tokenResp.status) +
             " " + tokenResp.body);
@@ -237,8 +179,8 @@ int LoginCmd::run(DevContext& ctx) {
     userBody.set("action", json::Value("get_user"));
 
     auto userResp = httpPostJson(HPM_DEV_CENTER_API,
-                                  json::dump(userBody, -1),
-                                  "Authorization: Bearer " + std::string(HPM_DEV_CENTER_APP_KEY));
+                                 json::dump(userBody, -1),
+                                 "Authorization: Bearer " + std::string(HPM_DEV_CENTER_APP_KEY));
     if (userResp.status != 200) {
         err("拉用户信息失败: HTTP " + std::to_string(userResp.status) +
             " " + userResp.body);
@@ -273,7 +215,7 @@ int LoginCmd::run(DevContext& ctx) {
     } else if (!githubUrl.empty()) {
         std::string defaultUrl = githubUrl + "/hpm-repo";
         auto r = confirmWithEdit("您绑定了 GitHub " + githubUrl +
-                                  "，用 " + defaultUrl + " 作为仓库地址吗？");
+                                 "，用 " + defaultUrl + " 作为仓库地址吗？");
         if (r == ConfirmResult::No) {
             std::cout << "已取消\n";
             return 0;

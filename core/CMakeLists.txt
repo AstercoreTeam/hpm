@@ -53,6 +53,7 @@ target_link_libraries(hpm_core
     PUBLIC
         nlohmann_json::nlohmann_json
         fmt::fmt
+        tomlplusplus::tomlplusplus
     PRIVATE
         CURL::libcurl
         OpenSSL::SSL

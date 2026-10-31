@@ -1,0 +1,24 @@
+{
+  "intermediate_devices": {},
+  "user_devices": {
+    "app_delay": {
+      "config": {
+        "clock_mode": "12",
+        "osc_hz": "11059200",
+        "timer_id": "1"
+      },
+      "driver": "time",
+      "version": "1.0.0"
+    },
+    "servo": {
+      "config": {
+        "clock_mode": "12",
+        "freq_hz": "50",
+        "osc_hz": "11059200"
+      },
+      "driver": "pwm",
+      "pin": "P1_0",
+      "version": "1.0.0"
+    }
+  }
+}

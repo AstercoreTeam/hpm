@@ -385,7 +385,7 @@ int HPM_FN(read_card)(unsigned char* uid, unsigned char len) {
 ### 1. 初始化驱动包
 
 ```bash
-hpm-dev init rc522 --type driver
+hpm-dev creat rc522 --type driver
 ```
 
 生成：
@@ -446,11 +446,24 @@ hpm build
 
 ### 7. 发布
 
+首先，确保用户已经注册HPM开发者账号并绑定了私域仓库
+如未注册，访问hpm.astercore.dpdns.org
+然后
+```bash
+hpm-dev login
+```
+
+如果未创建开发仓库：
+
+```bash
+hpm-dev init
+```
+
+发布:
+
 ```bash
 hpm-dev publish rc522-0.1.0 --key alice.key
 ```
-
-把 `publish/rc522-0.1.0.tar.gz` 和 `.sig` 上传到仓库，更新 `index.json`。
 
 ---
 
@@ -498,7 +511,7 @@ hpm-dev publish rc522-0.1.0 --key alice.key
    - 复位 → `"rst": { "type": "gpio_out", "methods": ["init", "write"], "optional": true }`
    - 中断 → `"int": { "type": "gpio_in", "methods": ["read"], "optional": true }`
 3. **确定 `provides`**：
-   - `init`：初始化
+   - `creat`：初始化
    - `read` / `write` / `read_xxx` / `write_xxx`：具体功能
    - 参数用 C 类型，指针用 `unsigned char*`
 4. **写 `manifest.json`**
@@ -517,7 +530,7 @@ hpm-dev publish rc522-0.1.0 --key alice.key
 
 ## 十一、参考
 
-- HPM 主仓库：`https://github.com/xzc842/hpm`
+- HPM 主仓库：`https://github.com/AstercoreTeam/hpm`
 - 驱动包格式规范：`docs/driver_package.md`
 - 示例驱动：`~/.hpm/packages/ch552_usb_cdc-1.0.0/`（USB CDC）、`rc522-1.2.0`（SPI 设备）
 

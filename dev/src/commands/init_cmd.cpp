@@ -1,14 +1,28 @@
+// Copyright 2026 XueZicheng <xuezicheng842@outlook.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // dev/src/commands/init_cmd.cpp
 #include "init_cmd.h"
 
-#include <hpm/config.h>
-#include <hpm/json/json_io.h>
-#include <hpm/util/fs_utils.h>
+#include "../dev_config.h"
+
+#include <hpm/util/process.h>
 
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include "hpm/config.h"
+#include <string>
+#include <cctype>
 
 namespace hpm::cli {
 
@@ -16,298 +30,197 @@ namespace fs = std::filesystem;
 
 namespace {
 
-void ok(const std::string& msg) {
-    std::cout << "\033[32mok\033[0m " << msg << "\n";
+void ok(const std::string& msg)   { std::cout << "\033[32mok\033[0m " << msg << "\n"; }
+void err(const std::string& msg)  { std::cerr << "\033[31merror\033[0m " << msg << "\n"; }
+void info(const std::string& msg) { std::cout << "\033[34minfo\033[0m " << msg << "\n"; }
+
+bool isTokenExpired(const std::string& expiresAt) {
+    return expiresAt.empty();
 }
 
-void err(const std::string& msg) {
-    std::cerr << "\033[31merror\033[0m " << msg << "\n";
+// raw 地址 -> SSH git 地址
+std::string rawToSshUrl(const std::string& raw) {
+    std::string url = raw;
+    while (!url.empty() && url.back() == '/') url.pop_back();
+
+    // GitHub raw
+    const std::string ghPrefix = "https://raw.githubusercontent.com/";
+    if (url.rfind(ghPrefix, 0) == 0) {
+        std::string rest = url.substr(ghPrefix.size()); // owner/repo/ref/...
+        auto p1 = rest.find('/');
+        if (p1 != std::string::npos) {
+            auto p2 = rest.find('/', p1 + 1);
+            if (p2 != std::string::npos) {
+                std::string owner = rest.substr(0, p1);
+                std::string repo  = rest.substr(p1 + 1, p2 - p1 - 1);
+                return "git@github.com:" + owner + "/" + repo + ".git";
+            }
+        }
+        return raw;
+    }
+
+    // GitLab: .../-/raw/<ref>/...
+    const std::string glMarker = "/-/raw/";
+    auto glPos = url.find(glMarker);
+    if (url.rfind("https://gitlab.com/", 0) == 0 && glPos != std::string::npos) {
+        std::string path = url.substr(std::string("https://gitlab.com/").size(),
+                                      glPos - std::string("https://gitlab.com/").size());
+        return "git@gitlab.com:" + path + ".git";
+    }
+
+    // Gitee: /<owner>/<repo>/raw/<ref>/...
+    if (url.rfind("https://gitee.com/", 0) == 0) {
+        auto rawPos = url.find("/raw/");
+        if (rawPos != std::string::npos) {
+            std::string path = url.substr(std::string("https://gitee.com/").size(),
+                                          rawPos - std::string("https://gitee.com/").size());
+            return "git@gitee.com:" + path + ".git";
+        }
+    }
+
+    return raw;
 }
 
-const char* kMitLicense =
-"MIT License\n"
-"\n"
-"Copyright (c) 2026 HPM contributors\n"
-"\n"
-"Permission is hereby granted, free of charge, to any person obtaining a copy\n"
-"of this software and associated documentation files (the \"Software\"), to deal\n"
-"in the Software without restriction, including without limitation the rights\n"
-"to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
-"copies of the Software, and to permit persons to whom the Software is\n"
-"furnished to do so, subject to the following conditions:\n"
-"\n"
-"The above copyright notice and this permission notice shall be included in all\n"
-"copies or substantial portions of the Software.\n"
-"\n"
-"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
-"IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
-"FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
-"AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
-"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
-"OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
-"SOFTWARE.\n";
-
-// 生成 driver manifest.json
-std::string makeDriverManifest(const std::string& name,
-                               const std::string& version,
-                               const std::string& license) {
-    auto root = json::Value::object();
-    root.set("name", json::Value(name));
-    root.set("version", json::Value(version));
-    root.set("description", json::Value(name + " driver"));
-    root.set("license", json::Value(license));
-
-    auto cfg = json::Value::object();
-    root.set("config", cfg);
-
-    auto req = json::Value::object();
-    root.set("requires", req);
-
-    auto provides = json::Value::object();
-    auto methods = json::Value::array();
-
-    auto initM = json::Value::object();
-    initM.set("name", json::Value("init"));
-    initM.set("return", json::Value("int"));
-    initM.set("params", json::Value::array());
-    methods.push(initM);
-
-    provides.set("methods", methods);
-    root.set("provides", provides);
-
-    return json::dump(root, 2) + "\n";
+bool askYesNo(const std::string& prompt) {
+    std::cout << prompt << " [y/N] ";
+    std::string line;
+    if (!std::getline(std::cin, line)) return false;
+    auto begin = line.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return false;
+    return std::tolower(static_cast<unsigned char>(line[begin])) == 'y';
 }
 
-// 生成 chip.json
-std::string makeChipJson(const std::string& name,
-                         const std::string& version,
-                         const std::string& license) {
-    (void)version;
-    auto root = json::Value::object();
-    root.set("name", json::Value(name));
-    root.set("family", json::Value(""));
-    root.set("package", json::Value(""));
-    root.set("license", json::Value(license));
-
-    auto build = json::Value::object();
-    build.set("cpu", json::Value(""));
-    auto flags = json::Value::array();
-    flags.push(json::Value("-mthumb"));
-    build.set("flags", flags);
-    build.set("ldscript", json::Value("ld/" + name + ".ld"));
-    build.set("startup", json::Value("src/startup.c"));
-    root.set("build", build);
-
-    auto tc = json::Value::object();
-    tc.set("cc", json::Value("arm-none-eabi-gcc"));
-    tc.set("objcopy", json::Value("arm-none-eabi-objcopy"));
-    tc.set("size", json::Value("arm-none-eabi-size"));
-    root.set("toolchain", tc);
-
-    auto flash = json::Value::object();
-    flash.set("tool", json::Value("st-flash"));
-    auto args = json::Value::array();
-    args.push(json::Value("write"));
-    args.push(json::Value("{bin}"));
-    args.push(json::Value("0x8000000"));
-    flash.set("args", args);
-    root.set("flash", flash);
-
-    auto provides = json::Value::object();
-    auto methods = json::Value::array();
-    auto initM = json::Value::object();
-    initM.set("name", json::Value("init"));
-    initM.set("return", json::Value("void"));
-    initM.set("params", json::Value::array());
-    methods.push(initM);
-    provides.set("methods", methods);
-    root.set("provides", provides);
-
-    auto pins = json::Value::object();
-    root.set("pins", pins);
-
-    return json::dump(root, 2) + "\n";
+hpm::Status runGit(const fs::path& cwd,
+                                const std::vector<std::string>& args,
+                                bool capture = false) {
+    std::vector<std::string> full;
+    full.reserve(args.size() + 2);
+    full.push_back("-C");
+    full.push_back(cwd.string());
+    full.insert(full.end(), args.begin(), args.end());
+    return hpm::util::runProcess("git", full, capture);
 }
 
-std::string makeDriverC(const std::string& name) {
-    return
-"#include \"" + name + ".h\"\n"
-"#include <stddef.h>\n"
-"\n"
-"#define HPM_CAT_(a, b) a##b\n"
-"#define HPM_CAT(a, b)  HPM_CAT_(a, b)\n"
-"#define HPM_FN(name)   HPM_CAT(DEVICE_NAME, HPM_CAT(_, name))\n"
-"#define HPM_CALL(prefix, method)  HPM_CAT(prefix, HPM_CAT(_, method))\n"
-"\n"
-"int HPM_FN(init)(void) {\n"
-"    // TODO: 初始化硬件\n"
-"    return 0;\n"
-"}\n";
-}
-
-std::string makeDriverH(const std::string& name) {
-    return
-"#pragma once\n"
-"#include \"hpm_dev.h\"\n"
-"\n"
-"// " + name + " 驱动内部头\n";
-}
-
-std::string makeChipC(const std::string& name) {
-    return
-"#include \"" + name + ".h\"\n"
-"\n"
-"void " + name + "_init(void) {\n"
-"    // TODO: 芯片初始化（时钟、外设）\n"
-"}\n";
-}
-
-std::string makeChipH(const std::string& name) {
-    return
-"#pragma once\n"
-"\n"
-"void " + name + "_init(void);\n";
-}
-
-std::string makeHpmPinH() {
-    return
-"#pragma once\n"
-"#include <stdint.h>\n"
-"\n"
-"// 每个引脚提供 init / write / read\n"
-"// void hpm_pin_<PIN>_init(void);\n"
-"// void hpm_pin_<PIN>_write(int level);\n"
-"// int  hpm_pin_<PIN>_read(void);\n";
-}
-
-std::string makeHpmPinC() {
-    return
-"#include \"hpm_pin.h\"\n"
-"#include \"CH552.H\"  // 改成你的芯片头文件\n"
-"\n"
-"// 示例：\n"
-"// #define DEF_PIN(port, bit) \\\n"
-"//     void hpm_pin_##port##_##bit##_init(void) { ... } \\\n"
-"//     void hpm_pin_##port##_##bit##_write(int level) { ... } \\\n"
-"//     int hpm_pin_##port##_##bit##_read(void) { ... }\n"
-"\n"
-"// DEF_PIN(PA, 0)\n";
-}
-
-std::string makeLinkerScript(const std::string& name) {
-    (void)name;
-    return
-"ENTRY(Reset_Handler)\n"
-"\n"
-"MEMORY {\n"
-"    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 64K\n"
-"    RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 20K\n"
-"}\n"
-"\n"
-"SECTIONS {\n"
-"    .isr_vector : { KEEP(*(.isr_vector)) } > FLASH\n"
-"    .text : { *(.text*) *(.rodata*) } > FLASH\n"
-"\n"
-"    _sidata = LOADADDR(.data);\n"
-"    .data : { _sdata = .; *(.data*) _edata = .; } > RAM AT > FLASH\n"
-"    .bss : { _sbss = .; *(.bss*) *(COMMON) _ebss = .; } > RAM\n"
-"\n"
-"    _estack = ORIGIN(RAM) + LENGTH(RAM);\n"
-"}\n";
-}
-
-std::string makeReadme(const std::string& name, const std::string& type) {
-    return
-"# " + name + "\n"
-"\n"
-"HPM " + type + " package.\n"
-"\n"
-"## 结构\n"
-"\n"
-"```\n"
-+ name + "-0.1.0/\n"
-"├── " + (type == "chip" ? HPM_FILE_CHIP : HPM_FILE_MANIFEST) + "\n"
-"├── LICENSE\n"
-"├── README.md\n"
-"├── src/\n"
-"└── include/\n"
-"```\n";
+// publish 目录是否为空（不存在也算空）
+bool dirIsEmpty(const fs::path& dir) {
+    if (!fs::exists(dir)) return true;
+    if (!fs::is_directory(dir)) return false;
+    return fs::directory_iterator(dir) == fs::directory_iterator();
 }
 
 } // namespace
 
 void InitCmd::setup(CLI::App& app) {
-    app.add_option("name", name_, "包名（如 rc522、stm32f103c8t6）")->required();
-    app.add_option("--type", type_, "driver / chip")->check(CLI::IsMember({"driver", "chip"}));
-    app.add_option("--version", version_, "版本号（默认 0.1.0）");
-    app.add_option("--license", license_, "许可证（默认 MIT）");
-    app.add_option("--dir", dir_, "输出目录（默认当前目录）");
+    app.add_flag("--force", force_, "强制重新配置 remote");
 }
 
 int InitCmd::run(DevContext& ctx) {
     (void)ctx;
 
-    if (name_.empty()) {
-        err("包名不能为空");
-        return 1;
-    }
+    const fs::path pubDir = fs::current_path() / "publish";
 
-    fs::path base = dir_.empty() ? fs::current_path() : fs::path(dir_);
-    fs::path pkgDir = base / (name_ + "-" + version_);
+    // 1. 读配置
+    auto cfg = loadDevConfig();
+    const bool haveCfg = cfg && !isTokenExpired(cfg->expiresAt) && !cfg->repoUrl.empty();
 
-    if (fs::exists(pkgDir)) {
-        err("目录已存在: " + pkgDir.string());
-        return 1;
-    }
-
-    std::error_code ec;
-    fs::create_directories(pkgDir / HPM_DIR_SRC, ec);
-    fs::create_directories(pkgDir / HPM_DIR_INCLUDE, ec);
-
-    if (type_ == "chip") {
-        fs::create_directories(pkgDir / HPM_DIR_LD, ec);
-    }
-
-    // manifest.json / chip.json
-    {
-        std::string content;
-        if (type_ == "chip") {
-            content = makeChipJson(name_, version_, license_);
+    std::string gitUrl;
+    bool userConfirmedRemote = false;
+    if (haveCfg) {
+        gitUrl = rawToSshUrl(cfg->repoUrl);
+        if (gitUrl != cfg->repoUrl) {
+            info("raw 地址已转换:");
+            std::cout << "  raw : " << cfg->repoUrl << "\n";
+            std::cout << "  git : " << gitUrl << "\n";
         } else {
-            content = makeDriverManifest(name_, version_, license_);
+            info("使用远程地址: " + gitUrl);
         }
-        fs::path path = pkgDir / (type_ == "chip" ? HPM_FILE_CHIP : HPM_FILE_MANIFEST);
-        auto st = util::writeFileAtomic(path, content);
-        if (!st.ok()) { err(st.error().message()); return 1; }
-    }
-
-    // LICENSE
-    {
-        auto st = util::writeFileAtomic(pkgDir / "LICENSE", kMitLicense);
-        if (!st.ok()) { err(st.error().message()); return 1; }
-    }
-
-    // README.md
-    {
-        auto st = util::writeFileAtomic(pkgDir / "README.md",
-                                        makeReadme(name_, type_));
-        if (!st.ok()) { err(st.error().message()); return 1; }
-    }
-
-    // src / include
-    if (type_ == "chip") {
-        util::writeFileAtomic(pkgDir / HPM_DIR_SRC / (name_ + ".c"), makeChipC(name_));
-        util::writeFileAtomic(pkgDir / HPM_DIR_SRC / "hpm_pin.c", makeHpmPinC());
-        util::writeFileAtomic(pkgDir / HPM_DIR_INCLUDE / (name_ + ".h"), makeChipH(name_));
-        util::writeFileAtomic(pkgDir / HPM_DIR_INCLUDE / "hpm_pin.h", makeHpmPinH());
-        util::writeFileAtomic(pkgDir / HPM_DIR_LD / (name_ + ".ld"), makeLinkerScript(name_));
+        userConfirmedRemote = askYesNo("是否将此地址作为远程仓库并克隆到 publish/？");
+    } else if (cfg) {
+        info("未登录或 AccessToken 已过期，跳过远程配置");
+        info("登录后运行 hpm-dev login，然后重新运行 hpm-dev init");
     } else {
-        util::writeFileAtomic(pkgDir / HPM_DIR_SRC / (name_ + ".c"), makeDriverC(name_));
-        util::writeFileAtomic(pkgDir / HPM_DIR_INCLUDE / (name_ + ".h"), makeDriverH(name_));
+        info("未登录，跳过远程配置");
+        info("登录后运行 hpm-dev login，然后重新运行 hpm-dev init");
     }
 
-    ok("已创建 " + pkgDir.string());
-    std::cout << "\n";
+    // 2. 情况一：用户确认远程 -> clone 到 publish
+    if (userConfirmedRemote) {
+        // publish 已存在且非空：走 fetch + reset 更新
+        if (fs::exists(pubDir / ".git")) {
+            info("publish 已是 git 仓库，尝试更新远程...");
+            auto curUrl = runGit(pubDir, {"remote", "get-url", "origin"}, true);
+            if (!curUrl.ok()) {
+                auto st = runGit(pubDir, {"remote", "add", "origin", gitUrl});
+                if (!st.ok()) { err("添加 remote 失败: " + st.error().message()); return 1; }
+                ok("已设置远程仓库: " + gitUrl);
+            } else if (force_) {
+                auto st = runGit(pubDir, {"remote", "set-url", "origin", gitUrl});
+                if (!st.ok()) { err("更新 remote 失败: " + st.error().message()); return 1; }
+                ok("已更新远程仓库: " + gitUrl);
+            }
+
+            auto fetch = runGit(pubDir, {"fetch", "origin", "main"});
+            if (!fetch.ok()) {
+                info("fetch 失败（可能是空仓库），继续: " + fetch.error().message());
+                return 0;
+            }
+            auto reset = runGit(pubDir, {"reset", "--hard", "origin/main"});
+            if (!reset.ok()) { err("reset 失败: " + reset.error().message()); return 1; }
+            ok("已更新到 origin/main");
+            return 0;
+        }
+
+        // publish 不存在或为空 -> 直接 clone
+        if (!dirIsEmpty(pubDir)) {
+            err("publish 目录已存在且非空，且不是 git 仓库: " + pubDir.string());
+            info("请清空该目录或改用 --force 后重试");
+            return 1;
+        }
+
+        // clone 要求目标目录为空或不存在：若已存在空目录，先删除
+        if (fs::exists(pubDir)) {
+            std::error_code ec;
+            fs::remove_all(pubDir, ec);
+            if (ec) { err("清理空 publish 目录失败: " + ec.message()); return 1; }
+        }
+
+        info("克隆远程仓库到 publish/ ...");
+        // clone 的最后一个参数是目标目录名；注意不能用 git -C（目录还不存在），
+        // 所以在 current_path 下执行，目标写 "publish"
+        auto clone = hpm::util::runProcess(
+            "git", {"clone", gitUrl, "publish"}, false);
+        if (!clone.ok()) {
+            err("git clone 失败: " + clone.error().message());
+            return 1;
+        }
+        ok("已克隆到 " + pubDir.string());
+        return 0;
+    }
+
+    // 3. 情况二：没有远程 / 用户拒绝 -> 仅本地 init
+    if (!fs::exists(pubDir)) {
+        std::error_code ec;
+        if (!fs::create_directories(pubDir, ec) || ec) {
+            err("创建 publish 目录失败: " + ec.message());
+            return 1;
+        }
+        ok("已创建目录: " + pubDir.string());
+    } else {
+        info("publish 目录已存在: " + pubDir.string());
+    }
+
+    if (fs::exists(pubDir / ".git")) {
+        info("publish 目录已是 git 仓库");
+        return 0;
+    }
+
+    auto st = runGit(pubDir, {"init", "-b", "main"});
+    if (!st.ok()) {
+        st = runGit(pubDir, {"init"});
+        if (!st.ok()) { err("git init 失败: " + st.error().message()); return 1; }
+        runGit(pubDir, {"branch", "-M", "main"});
+    }
+    ok("已在 publish 目录初始化 git 仓库（main 分支）");
     return 0;
 }
 

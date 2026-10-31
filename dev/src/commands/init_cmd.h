@@ -29,11 +29,7 @@ public:
     int run(DevContext& ctx);
 
 private:
-    std::string name_;
-    std::string type_ = "driver";
-    std::string dir_;
-    std::string version_ = "0.1.0";
-    std::string license_ = "MIT";
+    bool force_ = false;
 };
 
 } // namespace hpm::cli

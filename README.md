@@ -43,6 +43,9 @@ HPM 的答案：
 ---
 
 ## 安装
+### 从Release下载
+
+[下载最新版本](https://github.com/AstercoreTeam/hpm/releases/latest)
 
 ### 从源码编译
 
@@ -89,18 +92,27 @@ hpm init --mcu ch552g
 
 ### 2. 编辑清单
 
-`project.json`：
+`project.toml`
 
-```json
-{
-  "mcu": "ch552g",
-  "devices": {
-    "serial": {
-      "driver": "ch552_usb_cdc"
-    }
-  }
-}
+HPM 的清单文件默认使用 TOML。同一目录下若同时存在 `project.toml` 和 `project.json`，**以 `project.toml` 为准**，并自动回写同步 `project.json`。
+
+```toml
+mcu = "ch552g"
+
+[devices.serial]
+driver = "ch552_usb_cdc"
+
+[devices.serial.config]
+usb_vid              = "0x1209"
+usb_pid              = "0x0001"
+usb_device_version   = "0x0100"
+usb_max_power_ma     = "100"
+usb_manufacturer     = "XZC"
+usb_product          = "CH552 TEST CDC"
+usb_serial           = "0001"
+usb_interface        = "CDC"
 ```
+
 
 ### 3. 写应用
 
@@ -134,6 +146,8 @@ hpm sync
 hpm build
 hpm flash
 ```
+
+> 更多示例见[example](example/)
 ---
 
 ## 命令参考
@@ -162,154 +176,27 @@ hpm flash
 
 ## 清单文件
 
-### `project.json`
+### `project.toml`
 
-```json
-{
-  "mcu": "ch552g",
-  "devices": {
-    "<设备名>": {
-      "driver": "<驱动名>",
-      "<资源key>": "<引脚名或设备名>"
-    }
-  }
-}
+```toml
+mcu = "ch552g"
+
+[devices.<设备名>]
+driver = "<驱动名>"
+
+[devices.<设备名>.<资源key>]
 ```
 
-- `<设备名>`：应用语义名，决定生成的 API 前缀
-- `<驱动名>`：驱动包名字
-- `<资源key>`：跟驱动 `requires` 的 key 一致
+- `<设备名>`：应用语义名（TOML 表名），决定生成的 API 前缀，如 `serial` → `serial_write()`
+- `driver`：驱动包名字
+- `<资源key>`：跟驱动 `requires` 的 key 一致；简单值可直接写在 `[devices.<设备名>]` 下，复杂结构（如 `config` 子表）用 `[devices.<设备名>.<资源key>]` 展开
+
+> 也支持 JSON 格式：`project.json` 仍可读取。推荐直接使用 `project.toml`。
 
 ---
 
-## 核心概念
-
-### 设备名 vs 硬件名
-
-- **硬件名**：`P1.1`、`ch552g`、`ch552_usb_cdc` —— 物理事实
-- **设备名**：`serial` —— 用户起的应用语义名
-
-`project.json` 里写的设备名，决定生成的 API：`serial_write()`、`serial_read()`。
-
-### 引脚是唯一资源
-
-芯片驱动提供引脚，每个引脚带「能力」（能做 `gpio_out` / `spi_sck` / `uart_tx`…）。所有上层驱动都建立在引脚资源之上。
-
-每个引脚有 `shareable` 属性：总线信号（SCK/MISO/MOSI）可共享，CS/RST 独占。
-
-### 驱动分层
-
-```
-芯片驱动（提供引脚 + 芯片初始化）      ← 唯一碰寄存器的层
-    ↓
-总线驱动（spi / i2c / uart）         ← 申请引脚，提供总线接口
-    ↓
-设备驱动（rc522 / bmp280 / usb_cdc） ← 申请总线 + 引脚，提供应用接口
-    ↓
-用户应用（main.c）                    ← 只 include "driver.h"
-```
-
-每一层只依赖下一层的抽象接口。
-
-### 能力检查
-
-每一层声明 `requires` 和 `provides`，工具在生成期验证：
-
-- 引脚能力是否满足（PA5 能不能做 SPI1_SCK）
-- 方法是否存在（spi 驱动提不提供 transfer）
-- 名字是否冲突
-- 引脚是否被占用
-
-### 中间虚拟设备
-
-`rc522` 要 `spi`，用户只写了 `sck`/`miso`/`mosi` 引脚。工具自动创建中间设备 `__spi_a3f2`，把这三个引脚转移给它，`door_reader.bus` 指向它。
-
-- 默认对用户不可见
-- 随机 ID 写入 `driver.json`，之后复用
-- 用户可改名
-- `hpm dev --export` 后可暴露给底层调试
-
-### 宏机制
-
-每个实例一个目录，一份 `hpm_dev.h`：
-
-```c
-// driver/door_reader/hpm_dev.h
-#define DEVICE_NAME  door_reader
-#define bus          __spi_a3f2
-#define cs           hpm_pin_PA4
-```
-
-驱动源码用拼接宏：
-
-```c
-#define HPM_CAT_(a, b) a##b
-#define HPM_CAT(a, b)  HPM_CAT_(a, b)
-#define HPM_FN(name)   HPM_CAT(DEVICE_NAME, HPM_CAT(_, name))
-#define HPM_CALL(prefix, method)  HPM_CAT(prefix, HPM_CAT(_, method))
-
-int HPM_FN(init)(void) {              // → door_reader_init
-    HPM_CALL(cs, init)();             // → hpm_pin_PA4_init
-    HPM_CALL(cs, write)(1);           // → hpm_pin_PA4_write(1)
-    HPM_CALL(bus, init)();            // → __spi_a3f2_init
-    return 0;
-}
-```
-
-同一份 `rc522.c`，编译两次（`-Idoor_reader` 和 `-Igate_reader`），生成两套符号。驱动源码不改。
-
-### 芯片初始化
-
-芯片驱动也可以声明 `provides.methods`（如 `init`）。`hpm_init_all()` 自动调芯片初始化：
-
-```c
-// driver/driver.c（生成）
-void hpm_init_all(void) {
-    ch552g_init();       // 芯片初始化（时钟等）
-    serial_init();       // 设备初始化（USB CDC）
-}
-```
-
-用户 `main.c` 只需 `#include "driver.h"`。
-
----
-
-## 工作原理
-
-### `hpm sync`
-
-```
-1. 读 project.json → Project
-2. 读已有 driver.json（可空）
-3. 从本地包目录加载芯片驱动 → Chip
-4. 从本地包目录加载所有驱动 → DriverLibrary
-5. Resolver.resolve() → DriverState       （依赖解析，创建中间设备）
-6. CapabilityChecker.check(state)         （能力检查、冲突检测）
-7. 写 driver.json
-8. Generator.generate() → driver/         （代码生成）
-```
-
-### 依赖解析（两阶段）
-
-**阶段 1**：递归展开成 `ResolvedNode` 树
-- 从用户设备的 bindings 里按 key 取值
-- 遇到 `req.type` 是驱动名 → 创建子节点（中间设备）
-- 检测循环依赖、同名 key 冲突
-
-**阶段 2**：把树摊平成 `DriverState`
-- 根节点 → `user_devices`
-- 子节点 → `intermediate_devices`
-- 中间设备复用：按 `(driver, pins)` 查已有状态
-
-### 代码生成
-
-对每个实例（用户设备 + 中间设备）：
-1. 创建 `driver/<instance>/` 目录
-2. 生成 `hpm_dev.h`（`DEVICE_NAME` + 资源宏）
-3. 拷贝驱动源码
-4. 拷贝芯片驱动（全局一份）
-
-生成 `driver.h`（芯片 + 设备 API）、`driver.c`（`hpm_init_all`）、`Makefile`。
+## 技术说明
+见 [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---
 
@@ -320,11 +207,30 @@ void hpm_init_all(void) {
 | 项目 | 内容 |
 |------|------|
 | 芯片驱动 | `ch552g-1.0.0` |
-| 设备驱动 | `ch552_usb_cdc-1.0.0` |
+| 设备驱动 | `usb_cdc-ch552-1.0.0` |
 | 工具链 | `sdcc` + `packihx` |
-| 烧录 | `wchisp flash firmware.hex` |
+| 烧录 | `hpm flash` |
 | 验证内容 | USB 枚举、串口收发、回显、交互程序 |
 
+### STM32F103C8T6
+
+| 项目 | 内容 |
+|------|------|
+| 芯片驱动 | `stm32f103c8t6-1.0.0` |
+| 设备驱动 | 无 |
+| 工具链 | `arm-none-eabi-gcc` + `st-flash` |
+| 烧录 | `hpm flash` |
+| 验证内容 | LED点灯 |
+
+### STC90C51
+
+| 项目 | 内容 |
+|------|------|
+| 芯片驱动 | `stc90c51-0.1.0` |
+| 设备驱动 | `pwm-stc90c51-1.0.0` `time-stc90c51-1.0.0` |
+| 工具链 | `sdcc` + `stcgal` |
+| 烧录 | `hpm flash` |
+| 验证内容 | PWM驱动舵机，定时器 |
 
 ---
 
@@ -355,6 +261,7 @@ void hpm_init_all(void) {
 
 ### 进行中
 
+- [ ] **适配Windows**
 - [ ] **toolchain 管理**：自动下载工具链
 - [ ] **QEMU 测试**：`hpm-dev test` 支持多芯片模拟
 - [ ] **AI 驱动包生成**：从文档 + 开源代码整理驱动包
@@ -363,6 +270,8 @@ void hpm_init_all(void) {
 
 - [ ] **hpm-gui**：Qt 图形化生成 `project.json`
 - [ ] **KiCad 导入**：从原理图生成 `project.json`
+- [ ] **Debug**:`hpm-debug`qemu模拟芯片，并加载外设驱动包内的debug模块，例如wifi模块，可以使用本机的wifi,或桥接到本机网络，舵机输出角度，屏幕输出媒体流
+- [ ] **虚拟仿真环境**：通过blender插件将虚拟设备添加并绑定到3d场景，在godot模拟器上进行仿真，计划通过**[影梦启动器](https://gitcode.com/astercore/YingmengStudio)**生成虚拟环境（通过插件接入hpm-debug）
 
 ---
 
@@ -370,35 +279,20 @@ void hpm_init_all(void) {
 
 ### 开发
 
-```bash
-git clone https://gitcode.com/xzc842/hpm.git
-cd hpm
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-
-### 测试
-
-每个模块都有单元测试（`tests/unit/`）。新增功能请附带测试。
-
-```bash
-ctest --test-dir build -R "capability"
-```
+见 [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ### 驱动包贡献
 
-见 [写驱动包](docs/device_driver.md)。驱动包先放本地 `~/.hpm/packages/` 测试，registry 开放后提交。
+见 [写驱动包](docs/device_driver.md)。
 
 ### 芯片驱动贡献
 
 见 [写芯片驱动](docs/mcu_driver.md)。优先支持：
 
-- STM32F103C8T6（Blue Pill）
 - ESP32-C3
 - RP2040
 - CH32V003
-先放本地 `~/.hpm/packages/` 测试，registry 开放后提交。
+
 
 ### 文档
 
@@ -415,6 +309,10 @@ ctest --test-dir build -R "capability"
 | [CLI11](https://github.com/CLIUtils/CLI11.git) | 命令行解析 | BSD-3-Clause |
 | [Catch2](https://github.com/catchorg/Catch2.git) | 单元测试 | BSL-1.0 |
 | [libcurl](https://github.com/curl/curl.git) | HTTP 客户端（registry 用） | curl（MIT 类） |
+| [toml++](https://github.com/marzer/tomlplusplus.git) | TOML 清单解析 | MIT |
+| [OpenSSL](https://github.com/openssl/openssl.git) | 签名校验 / HTTPS | Apache-2.0 |
+| [libzip](https://github.com/nih-at/libzip.git) | 包打包 / 解包 | BSD-3-Clause |
+| [cpp-httplib](https://github.com/yhirose/cpp-httplib.git) | HTTP 客户端 / OAuth 回调 server | MIT |
 
 ## 开源许可
 
@@ -422,7 +320,7 @@ Apache-2.0 [LICENSE](LICENSE)
 
 ## 贡献
 
-欢迎提交 Issue 和 Pull Request。请参阅[ToDo文档](ToDo.md)
+欢迎提交 Issue 和 Pull Request。请参阅[CONTRIBUTING.md](CONTRIBUTING.md)、[ToDo文档](ToDo.md)
 
 ## 联系方式
 ---

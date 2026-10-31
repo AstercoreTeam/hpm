@@ -14,13 +14,33 @@
 
 // core/src/json/json_io.cpp
 #include <hpm/json/json_io.h>
-#include "json_impl.h" 
+#include "json_impl.h"
 #include <nlohmann/json.hpp>
 
+#include <toml++/toml.hpp> 
+
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
 namespace hpm::json {
+
+// ---------- 内部辅助：TOML 文本 -> JSON 文本 ----------
+namespace {
+
+Result<std::string> tomlToJsonText(const std::string& tomlText) {
+    try {
+        auto tbl = toml::parse(tomlText);
+        std::ostringstream ss;
+        ss << toml::json_formatter{tbl};
+        return ss.str();
+    } catch (const toml::parse_error& e) {
+        return Error(ErrorCode::ManifestParseError,
+                     std::string("TOML 解析失败: ") + e.what());
+    }
+}
+
+} // namespace
 
 Result<Value> parse(const std::string& text) {
     try {
@@ -34,14 +54,39 @@ Result<Value> parse(const std::string& text) {
     }
 }
 
+// 读文件：同目录存在同名 .toml 时优先读 TOML 并转成 JSON，否则读原 JSON 文件
 Result<Value> parseFile(const std::filesystem::path& path) {
-    std::ifstream f(path, std::ios::binary);
+    auto tomlPath = path;
+    tomlPath.replace_extension(".toml");
+
+    std::error_code ec;
+    bool hasToml = std::filesystem::exists(tomlPath, ec) && !ec;
+
+    std::filesystem::path actual = hasToml ? tomlPath : path;
+
+    std::ifstream f(actual, std::ios::binary);
     if (!f) {
         return Error(ErrorCode::IoError,
-                     "无法打开文件: " + path.string());
+                     "无法打开文件: " + actual.string());
     }
     std::ostringstream ss;
     ss << f.rdbuf();
+
+    if (hasToml) {
+        auto jsonText = tomlToJsonText(ss.str());
+        if (!jsonText.ok()) return jsonText.error();
+        auto parsed = parse(jsonText.value());
+        if (!parsed.ok()) return parsed;
+
+        // 回写同名 .json，保持 json 与 toml 同步
+        auto writeSt = writeFile(*parsed, path, 2);
+        if (!writeSt.ok()) {
+            // 回写失败不阻断解析，只提示（可选：返回 error）
+            // 这里选择不阻断，避免只读目录/权限问题导致 sync 失败
+        }
+        return parsed;
+    }
+
     return parse(ss.str());
 }
 

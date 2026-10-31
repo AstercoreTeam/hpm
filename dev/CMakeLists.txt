@@ -24,7 +24,9 @@ add_executable(hpm-dev
     src/commands/validate_cmd.cpp
     src/commands/publish_cmd.cpp
     src/commands/login_cmd.cpp
-    src/commands/sync_cmd.cpp
+    src/commands/creat_cmd.cpp
+    src/http.cpp
+
 )
 
 target_link_libraries(hpm-dev

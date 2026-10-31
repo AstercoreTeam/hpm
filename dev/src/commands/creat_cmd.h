@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-// dev/src/commands/sync_cmd.h
 #pragma once
 
 #include "../dev_context.h"
@@ -23,13 +22,17 @@
 
 namespace hpm::cli {
 
-class SyncCmd {
+class CreateCmd {
 public:
     void setup(CLI::App& app);
     int run(DevContext& ctx);
 
 private:
-    std::string zipFile_;
+    std::string name_;
+    std::string type_ = "driver";
+    std::string dir_;
+    std::string version_ = "0.1.0";
+    std::string license_ = "MIT";
 };
 
 } // namespace hpm::cli

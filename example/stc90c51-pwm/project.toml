@@ -1,0 +1,18 @@
+mcu = "stc90c51"
+
+[devices.app_delay]
+driver = "time"
+
+[devices.app_delay.config]
+timer_id   = "1"
+osc_hz     = "11059200"
+clock_mode = "12"
+
+[devices.servo]
+driver = "pwm"
+pin    = "P1_0"
+
+[devices.servo.config]
+freq_hz    = "50"
+osc_hz     = "11059200"
+clock_mode = "12"
